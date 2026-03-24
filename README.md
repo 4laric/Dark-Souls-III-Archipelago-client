@@ -1,3 +1,7 @@
+# ⚠️ Warning ⚠️
+
+This is no longer the latest version of the Dark Souls III Archipelago Randomizer! [This is now the latest repository](https://github.com/fswap/from-software-archipelago-clients).
+
 # Dark-Souls-III-Archipelago-client
 
 Dark Souls III client made for Archipelago multiworld randomizer. See [archipelago.gg] for
