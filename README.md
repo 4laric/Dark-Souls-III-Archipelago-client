@@ -1,47 +1,31 @@
-# ⚠️ Warning ⚠️
+# ER Archipelago runtime-client — additions bundle
 
-This is no longer the latest version of the Dark Souls III Archipelago Randomizer! [This is now the latest repository](https://github.com/fswap/from-software-archipelago-clients).
+Merge these into the spec-3 (Elden Ring runtime-client) repo, which mirrors the DS3 Archipelago
+client layout (MSVC `.sln`/`.vcxproj`, all source under `archipelago-client/`).
 
-# Dark-Souls-III-Archipelago-client
+```
+archipelago-client/   Client source — the decode/version/singleton/hooks headers and the Windows
+                      gamehook implementation. ADD er_gamehook_win.cpp to the .vcxproj and
+                      .vcxproj.filters or it won't compile. These supersede the DS3-specific pieces:
+                        er_gamehook.* + er_hooks.h   ->  replace GameHook.{h,cpp}
+                        er_goods_row.h + er_item_decode.h  ->  replace the goods struct/decode in Params.h
+                        er_singletons.h              ->  replace the fd4_singleton subproject
+                      ItemRandomiser / Core / ArchipelagoInterface keep their structure; rewire their
+                      item-handling to call er_ap::game:: and add the three touchpoints (Init(),
+                      Archipelago_SendLocationCheck / Er_GrantReceivedGoods, versionSatisfies()).
 
-Dark Souls III client made for Archipelago multiworld randomizer. See [archipelago.gg] for
-general information about Archipelago, and [the Dark Souls III setup guide] for instructions
-on setting up and using this mod.
+tests/                Host (g++) unit tests + Makefile. NOT part of the .sln. Run anywhere:
+                        cd tests && make test
+                      Validates the pure logic (decode, row offsets, param walk, version gate) and
+                      reconciles the recombine against spec-2's golden vectors. Good CI (Linux) check.
 
-[archipelago.gg]: https://archipelago.gg/
-[the Dark Souls III setup guide]: https://archipelago.gg/tutorial/Dark%20Souls%20III/setup_en
-	
-## Troubleshoots
-- The provided dll requires other dependencies so if you encounter a crash when launching the game.
-   - installing the latest Microsoft Visual C++ Redistributable version should fix it : https://aka.ms/vs/17/release/vc_redist.x64.exe.
-- The Windows console tends to freeze preventing you from sending or receiving any items.
-   - You must Alt+Tab, click on the console and press enter to refresh it.
-- When trying to stream the Dark Souls 3 window to Discord when the Archipelago mod is used along ModEngine, the game crashes instantly with "Fatal Application Exit" window containing the ExpCode 0x80000003.
-   - Change the modengine.ini file and set `blockNetworkAccess=0`
+tools/                NOTES.md  — provenance & reference: build target/hash, resolved address table,
+                                  the param-walk chain, the decode contract, cross-validation, and the
+                                  two first-run verification flags. READ THIS FIRST.
+                      fetch_def.py / compute_offsets.py — re-derive and re-validate the EquipParamGoods
+                                  offsets from Paramdex (compute_offsets.py asserts the 176-byte stride).
+                      EquipParamGoods.xml — the Paramdex def the offsets were computed from (vendored).
+```
 
-## Building Locally
-
-To prepare your environment:
-
-1. Install Visual Studio with C++ support.
-2. Install [vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/get-started-vs):
-   - Clone its repository (`git clone https://github.com/microsoft/vcpkg.git`).
-   - Run its bootstrap script (`bootstrap-vcpkg.bat`).
-   - Integrate it with Visual Studio (`vcpkg integrate install`).
-
-To build the project:
-
-1. Clone the repository (`git clone https://github.com/Marechal-L/Dark-Souls-III-Archipelago-client.git`).
-2. Install submodules (`git submodule update --init --recursive`).
-3. Open `archipelago-client\archipelago-client.sln` in Visual Studio.
-4. Run Build > Build.
-
-That's it! The mod will be in `x64\Debug\archipelago.dll`. Copy that over the file of the same
-name from the released version of the mod and you can test against your local build.
-
-## Credits
-https://github.com/LukeYui/DS3-Item-Randomiser-OS by LukeYui  
-https://github.com/black-sliver/apclientpp by black-sliver
-
-
-
+Everything that can be validated without the game already is. The only remaining steps are your
+MSVC build and the two runtime confirmations described in `tools/NOTES.md`.
