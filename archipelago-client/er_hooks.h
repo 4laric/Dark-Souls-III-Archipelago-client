@@ -60,7 +60,12 @@ constexpr const char* ParamBase_AOB =
 constexpr int PARAM_ENTRY_STRIDE  = 0x48;   // 72
 constexpr int PARAM_ENTRY_OFF     = 0x88;
 constexpr int PARAM_HEADER_DEREF  = 0x80;
-constexpr int PARAM_INDEX_GOODS   = 3;      // 0 weapon, 1 armor, 2 talisman, 3 goods, 10 bullet, 14 magic
+constexpr int PARAM_INDEX_GOODS   = 3;      // EquipParamGoods. CONFIRMED LIVE: with the correct two-
+                                            // deref blob walk, the in-game scan found goods (rowCount
+                                            // 3571, firstRowId 0) at repo index 3. The original value
+                                            // was right; the only bug was the missing 2nd +0x80 deref
+                                            // (er_gamehook.h). (The repo is NOT BND-ordered; "44" was
+                                            // a wrong detour.)
 constexpr int PARAM_ROWCOUNT_OFF  = 0x0A;   // u16
 constexpr int PARAM_ROWIDX_OFF    = 0x40;   // first 24-byte index entry
 constexpr int PARAM_ROWIDX_STRIDE = 24;

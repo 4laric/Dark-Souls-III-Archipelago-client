@@ -113,22 +113,22 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;MODENGINE_EXTERNAL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <PreprocessorDefinitions>NDEBUG;MODENGINE_EXTERNAL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="AutoEquip.cpp" />
     <ClCompile Include="Core.cpp" />
     <ClCompile Include="GameHook.cpp" />
     <ClCompile Include="ItemRandomiser.cpp" />
     <ClCompile Include="NoRequirements.cpp" />
     <ClCompile Include="ArchipelagoInterface.cpp" />
+    <ClCompile Include="er_gamehook_win.cpp" />
     <ClCompile Include="subprojects\fd4_singleton\fd4_singleton.cpp" />
     <ClCompile Include="subprojects\minhook\src\buffer.c" />
     <ClCompile Include="subprojects\minhook\src\hde\hde32.c" />
@@ -142,6 +142,12 @@
     <ClInclude Include="GameHook.h" />
     <ClInclude Include="ArchipelagoInterface.h" />
     <ClInclude Include="Params.h" />
+    <ClInclude Include="er_gamehook.h" />
+    <ClInclude Include="er_hooks.h" />
+    <ClInclude Include="er_goods_row.h" />
+    <ClInclude Include="er_item_decode.h" />
+    <ClInclude Include="er_singletons.h" />
+    <ClInclude Include="er_version_check.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="subprojects\asio\asio\include\asio.hpp" />
     <ClInclude Include="subprojects\fd4_singleton\fd4_singleton.h" />

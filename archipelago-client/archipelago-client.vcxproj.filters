@@ -48,9 +48,6 @@
     <ClCompile Include="ItemRandomiser.cpp">
       <Filter>Fichiers sources\GameHook</Filter>
     </ClCompile>
-    <ClCompile Include="AutoEquip.cpp">
-      <Filter>Fichiers sources\GameHook</Filter>
-    </ClCompile>
     <ClCompile Include="NoRequirements.cpp">
       <Filter>Fichiers sources\GameHook</Filter>
     </ClCompile>
@@ -60,12 +57,33 @@
     <ClCompile Include="subprojects\fd4_singleton\fd4_singleton.cpp">
       <Filter>Fichiers sources</Filter>
     </ClCompile>
+    <ClCompile Include="er_gamehook_win.cpp">
+      <Filter>Fichiers sources\GameHook</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core.h">
       <Filter>Fichiers d%27en-tête</Filter>
     </ClInclude>
     <ClInclude Include="GameHook.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_gamehook.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_hooks.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_goods_row.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_item_decode.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_singletons.h">
+      <Filter>Fichiers d%27en-tête</Filter>
+    </ClInclude>
+    <ClInclude Include="er_version_check.h">
       <Filter>Fichiers d%27en-tête</Filter>
     </ClInclude>
     <ClInclude Include="subprojects\minhook\src\buffer.h">

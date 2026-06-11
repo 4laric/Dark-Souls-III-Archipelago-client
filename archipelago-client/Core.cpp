@@ -1,17 +1,17 @@
 #include "Core.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <conio.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/wincolor_sink.h>
 
-#include "AutoEquip.h"
 #include "GameHook.h"
 #include "ItemRandomiser.h"
 
 CCore* Core;
 CGameHook* GameHook;
 CItemRandomiser* ItemRandomiser;
-CAutoEquip* AutoEquip;
 CArchipelago* ArchipelagoInterface;
 
 using nlohmann::json;
@@ -22,7 +22,6 @@ CCore::CCore(modengine::ModEngineExtensionConnector* connector)
 	Core = this;
 	GameHook = new CGameHook();
 	ItemRandomiser = new CItemRandomiser();
-	AutoEquip = new CAutoEquip();
 }
 
 void CCore::InitConfigPath()
@@ -118,6 +117,11 @@ void CCore::SetSeed(std::string seed, bool fromSave)
 }
 
 void CCore::on_attach() {
+	// Run attach exactly once, even if both the standalone DllMain path and ModEngine2 drive it.
+	static bool attached = false;
+	if (attached) return;
+	attached = true;
+
 	// Set up the client console
 	modEngineDebug = !AllocConsole();
 	SetConsoleTitleA("Dark Souls III - Archipelago Console");
@@ -138,6 +142,22 @@ void CCore::on_attach() {
 		// ME2 should really handle these by default, but currently it does not.
 		spdlog::default_logger()->set_level(spdlog::level::trace);
 		spdlog::default_logger()->flush_on(spdlog::level::trace);
+	}
+
+	// Always write a full-detail log to disk so diagnostics survive even if the console isn't visible
+	// or scrolls away. Lands at %LOCALAPPDATA%\archipelago_client.log.
+	try {
+		const char* localAppData = std::getenv("LOCALAPPDATA");
+		std::string logPath = std::string(localAppData ? localAppData : ".") + "\\archipelago_client.log";
+		auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath, true);
+		fileSink->set_level(spdlog::level::trace);
+		spdlog::default_logger()->sinks().push_back(fileSink);
+		spdlog::default_logger()->set_level(spdlog::level::trace);
+		spdlog::default_logger()->flush_on(spdlog::level::trace);
+		spdlog::info("Writing detailed log to {}", logPath);
+	}
+	catch (...) {
+		// If the file sink can't be created, carry on with console logging only.
 	}
 
 	spdlog::info(
@@ -597,10 +617,43 @@ void CCore::LoadSaveFile() {
 	}
 };
 
-// Entrypoint called by ModEngine2 to initialize this extension.
+// Entrypoint called by ModEngine2 to initialize this extension. Routed through StandaloneInit so a
+// prior DllMain self-init isn't duplicated; on_attach() is idempotent if ME2 also calls it.
 bool modengine_ext_init(modengine::ModEngineExtensionConnector* connector,
 		modengine::ModEngineExtension** extension) {
-	*extension = new CCore(connector);
+	(void)connector;   // unused: hooking is MinHook via er_ap::game::Init(), not the ME2 connector
+	CCore::StandaloneInit();
+	*extension = Core;
 	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Standalone (non-ModEngine2) entry point.
+//
+// Generic DLL loaders (ModEngine3, Elden Mod Loader, ...) only LoadLibrary the DLL and run DllMain;
+// they never call modengine_ext_init. Since the only ME2 dependency was the connector (never used —
+// hooking is MinHook via er_ap::game::Init()), we self-initialize: build CCore with a null connector
+// (safe now that MODENGINE_EXTERNAL is undefined, so the base ctor doesn't deref it) and drive
+// on_attach() ourselves.
+VOID CCore::StandaloneInit() {
+	static std::atomic<bool> started{ false };
+	if (started.exchange(true)) return;   // run exactly once
+	if (Core) return;                      // already constructed elsewhere
+	new CCore(nullptr);                    // ctor assigns the global Core = this
+	Core->on_attach();
+}
+
+static DWORD WINAPI ArchipelagoStandaloneThread(LPVOID) {
+	CCore::StandaloneInit();
+	return 0;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
+	if (reason == DLL_PROCESS_ATTACH) {
+		DisableThreadLibraryCalls(hModule);
+		// Do the real work off the loader lock.
+		CreateThread(nullptr, 0, ArchipelagoStandaloneThread, nullptr, 0, nullptr);
+	}
+	return TRUE;
 }
 

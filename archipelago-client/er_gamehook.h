@@ -30,8 +30,15 @@ inline const uint8_t* GoodsBlobFromRepo(uintptr_t paramRepoInstance) {
     std::memcpy(&hdr, reinterpret_cast<const void*>(
         paramRepoInstance + (uintptr_t)PARAM_INDEX_GOODS * PARAM_ENTRY_STRIDE + PARAM_ENTRY_OFF), 8);
     if (!hdr) return nullptr;
+    // GetParam in the exe derefs +0x80 TWICE to reach the PARAM blob (rowCount @ +0x0A):
+    //   blob = *(*(hdr + 0x80) + 0x80).
+    // The old single-deref read an intermediate struct as the param header (garbage rowCount).
+    // Confirmed by disassembling eldenring.exe 2.6.2.0 (the generic GetParam routine).
+    uint64_t mid;
+    std::memcpy(&mid, reinterpret_cast<const void*>((uintptr_t)hdr + PARAM_HEADER_DEREF), 8);
+    if (!mid) return nullptr;
     uint64_t blob;
-    std::memcpy(&blob, reinterpret_cast<const void*>((uintptr_t)hdr + PARAM_HEADER_DEREF), 8);
+    std::memcpy(&blob, reinterpret_cast<const void*>((uintptr_t)mid + PARAM_HEADER_DEREF), 8);
     return reinterpret_cast<const uint8_t*>((uintptr_t)blob);
 }
 

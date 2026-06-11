@@ -49,6 +49,11 @@ public:
 
 	static VOID Start();
 	static VOID InputCommand();
+
+	// Self-initialize without ModEngine2: construct the global CCore (null connector) and drive
+	// on_attach() ourselves. Called from DllMain so the client works under any DLL loader
+	// (ModEngine3, Elden Mod Loader, ...), not just ME2's modengine_ext_init. Idempotent.
+	static VOID StandaloneInit();
 	virtual VOID Run();
 	virtual VOID Panic(const char* pMessage, const char* pSort, DWORD dError, DWORD dIsFatalError);
 	virtual BOOL CheckOldApFile();
@@ -77,7 +82,7 @@ public:
 
 	// The seed used to generate this multiworld. We use this to double-check that the save file
 	// which was loaded is in fact connected to the correct Archipelago room. Note that this isn't
-	// strictly unique—multiple distinct rooms can use the same generation, and it's possible that
+	// strictly uniqueï¿½multiple distinct rooms can use the same generation, and it's possible that
 	// someone may manually supply the same seed to multiple generations.
 	//
 	// This is set to none before the seed has been loaded from the save file, or if the save file

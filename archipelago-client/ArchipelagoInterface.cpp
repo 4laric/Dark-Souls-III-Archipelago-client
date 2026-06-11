@@ -30,7 +30,7 @@ BOOL CArchipelago::Initialise(std::string URI) {
 		ap->reset();
 	}
 
-	ap = new APClient(uuid, "Dark Souls III", URI);
+	ap = new APClient(uuid, "EldenRing", URI);
 
 	ap_sync_queued = false;
 	ap->set_socket_connected_handler([]() {
@@ -95,7 +95,7 @@ BOOL CArchipelago::Initialise(std::string URI) {
 	ap->set_room_info_handler([]() {
 		std::list<std::string> tags;
 		if (GameHook->dIsDeathLink) { tags.push_back("DeathLink"); }
-		ap->ConnectSlot(Core->pSlotName, Core->pPassword, 5, tags, { 0,6,1 });
+		ap->ConnectSlot(Core->pSlotName, Core->pPassword, 5, tags, { 0,6,6 });
 		});
 
 	ap->set_items_received_handler([](const std::list<APClient::NetworkItem>& items) {

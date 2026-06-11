@@ -1,128 +1,69 @@
 #pragma once
 
+#include <string>
+
 #include "Core.h"
 #include "GameTypes.h"
-#include "Params.h"
-#include "mem/mem.h"
-#include "./subprojects/minhook/include/MinHook.h"
+#include "Params.h"   // pulls er_ap::game:: (Init, GrantGoods, SetEventFlag, ParamRepoInstance)
 
+// Goods-only ER game hook. This is a slim shim over er_ap::game:: that preserves the CGameHook
+// interface the rest of the client calls. The DS3 implementation (function-pattern scanning,
+// ItemGib/OnGetItem/world-loaded/serialize hooks, HP/Soul-of-Cinder reads, equip + inventory
+// manipulation) is retired: ER pickup detection and item granting go through the AddItemFunc detour
+// (er_gamehook_win.cpp), installed by er_ap::game::Init(). DS3-only features (DeathLink, auto-equip,
+// banners, DLC checks, Path of the Dragon) are stubbed for the MVP — see the .cpp for TODOs.
 class CGameHook {
 public:
-	virtual BOOL initialize();
-	virtual BOOL applySettings();
-	virtual VOID updateRuntimeValues();
-	virtual VOID GiveNextItem();
-	virtual BOOL isSoulOfCinderDefeated();
-	virtual VOID manageDeathLink();
+	// Install the ER AddItemFunc detour and resolve singletons. False if any signature fails.
+	BOOL initialize();
+
+	// Apply connection options. No-op for the MVP (option toggles not yet wired into ER behavior).
+	BOOL applySettings();
+
+	// Per-tick runtime read (HP, goal flag). No-op for the MVP.
+	VOID updateRuntimeValues();
+
+	// Grant one queued received item via the ER goods path.
+	VOID GiveNextItem();
+
+	// ER goal detection (Elden Lord) not wired yet; always false for the MVP.
+	BOOL isSoulOfCinderDefeated();
+
+	// DeathLink out of scope for the MVP.
+	VOID manageDeathLink();
+
+	// True once it's safe to act (param repository resolvable).
+	BOOL isEverythingLoaded();
+
+	// In-game banner. Not wired to ER UI yet (string form logs; wide form is a no-op).
+	VOID showBanner(std::wstring message);
+	VOID showBanner(std::string message);
+
+	// Set an in-game event flag via the ER event-flag function.
+	VOID setEventFlag(DWORD eventId, BOOL enabled);
+
+	// DS3 gesture; no ER equivalent (no-op).
+	VOID grantPathOfTheDragon();
+
+	// Auto-equip out of scope for the MVP (no-op).
+	VOID equipItem(EquipSlot equipSlot, DWORD inventorySlot);
+
+	// TODO(ER inventory removal): remove an item from the player's inventory. No-op for now.
+	VOID removeFromInventory(int32_t itemCategory, int32_t itemId, uint64_t quantity = 1);
+
+	// Debug command (/itemGib): grant a goods item by base id.
+	VOID itemGib(int goodsId);
+
 	int healthPoint = -1, lastHealthPoint = -1;
-	char soulOfCinderDefeated;
+	char soulOfCinderDefeated = 0;
 
-	// Whether everything the mod needs to access is fully available.
-	virtual BOOL isEverythingLoaded();
-
-	// Displays a banner message to the player. Only works if they're in an active game, not on the
-	// menu.
-	virtual VOID showBanner(std::wstring message);
-	virtual VOID showBanner(std::string message);
-
-	// Sets the event flag with the given ID on or off. Works the same as the DarkScript3 function of
-	// the same name.
-	virtual VOID setEventFlag(DWORD eventId, BOOL enabled);
-
-	// Grants the player the Path of the Dragon gesture.
-	virtual VOID grantPathOfTheDragon();
-
-	// Equips an item for the active player based on its index in their inventory.
-	virtual VOID equipItem(EquipSlot equipSlot, DWORD inventorySlot);
-
-	// Removes the given item from the player's inventory, if it contains any.
-	virtual VOID removeFromInventory(int32_t itemCategory, int32_t itemId, uint64_t quantity = 1);
-
-	DWORD dLockEquipSlots;
-	DWORD dIsNoWeaponRequirements;
-	DWORD dIsNoSpellsRequirements;
-	DWORD dIsNoEquipLoadRequirements;
-	DWORD dIsDeathLink;
-	DWORD dEnableDLC;
-	HANDLE hHeap;
+	DWORD dLockEquipSlots = 0;
+	DWORD dIsNoWeaponRequirements = 0;
+	DWORD dIsNoSpellsRequirements = 0;
+	DWORD dIsNoEquipLoadRequirements = 0;
+	DWORD dIsDeathLink = 0;
+	DWORD dEnableDLC = 0;
+	HANDLE hHeap = nullptr;
 
 	BOOL deathLinkData = false;
-
-private:
-	static uintptr_t FindExecutableAddress(uintptr_t ptrOffset, std::vector<unsigned int> offsets);
-	static uintptr_t GetModuleBaseAddress();
-	static uintptr_t FindDMAAddy(HANDLE hProc, uintptr_t ptr, std::vector<unsigned int> offsets);
-	static BOOL SimpleHook(LPVOID pAddress, LPVOID pDetour, LPVOID* ppOriginal);
-	static VOID LockEquipSlots();
-	static VOID killThePlayer();
-	BOOL checkIsDlcOwned();
-	
-	// Whether the world is loaded. This doesn't *necessarily* mean that everything we need is
-	// accessible; for that, check isEverythingLoaded.
-	BOOL isWorldLoaded;
-
-	// A hooked function that's run when the game requests a message to display.
-	static const wchar_t* HookedGetActionEventInfoFmg(LPVOID messages, DWORD messageId);
-
-	// A hooked function that's run after the data has been loaded for the current game world.
-	static LPVOID HookedOnWorldLoaded(ULONGLONG unknown1, ULONGLONG unknown2, DWORD unknown3,
-		DWORD unknown4, DWORD unknown5);
-
-	// A hooked function that's run to unload data for the current game world.
-	static void HookedOnWorldUnloaded(ULONGLONG unknown1, ULONGLONG unknown2, ULONGLONG unknown3,
-		ULONGLONG unknown4);
-
-	// A hooked function that's run when the player's game is saved and writes some additional data
-	// to the save file.
-	static boolean HookedSerializeEquipGameData(EquipGameData* self, DLMemoryOutputStream* stream);
-
-	// A hooked function that's run when the player's game is loaded and reads some additional data
-	// from the save file.
-	static boolean HookedDeserializeEquipGameData(
-		EquipGameData* self, DLMemoryInputStream* stream);
-
-	// Writes a length-delimited string to the given output stream.
-	static boolean SerializeString(DLMemoryOutputStream* stream, std::string string);
-
-	// Reads a length-delimited string from the given output stream.
-	static std::optional<std::string> DeserializeString(DLMemoryInputStream* stream);
-
-	// The internal DS3 function that looks up the current localization's message for the given ID. We
-	// override this to support custom messages with custom IDs.
-	decltype(&HookedGetActionEventInfoFmg) GetActionEventInfoFmgOriginal;
-
-	// The function that allocates a bunch of in-game singletons like WorldChrMan. Once this runs, it's
-	// generally safe to make in-game changes.
-	decltype(&HookedOnWorldLoaded) OnWorldLoadedOriginal;
-
-	// The deallocator dual of OnWorldLoadedOriginal. Once this runs, it's no longer safe to make
-	// in-game changes.
-	decltype(&HookedOnWorldUnloaded) OnWorldUnloadedOriginal;
-
-	// The function that writes an EquipGameData to a data stream to save it.
-	decltype(&HookedSerializeEquipGameData) SerializeEquipGameDataOriginal;
-
-	// The function that reads an EquipGameData from a data stream to loadit.
-	decltype(&HookedDeserializeEquipGameData) DeserializeEquipGameDataOriginal;
-
-	uintptr_t BaseB = -1;
-	uintptr_t GameFlagData = -1;
-	uintptr_t Param = -1;
-	uintptr_t EquipLoad = -1;
-
-	// The next message to send when calling the internal message display function. Not remotely
-	// thread-safe, but that shouldn't be an issue as long as we only display banners from the main
-	// archipelago thread.
-	std::wstring nextMessageToSend;
 };
-
-// Returns a pointer to the location of the given memory pattern in the current executable, or
-// NULL if the pattern asn't found. If offset is passed, the pointer is adjusted by that many
-// bytes if it's found.
-//
-// The name is used for error reporting.
-static mem::pointer FindPattern(const char* name, const char* pattern, ptrdiff_t offset = 0);
-
-// Given a pointer to the beginning of a MOV instruction whose argument is a relative offset,
-// returns the address that offset is pointing to.
-static mem::pointer ResolveMov(mem::pointer pointer);

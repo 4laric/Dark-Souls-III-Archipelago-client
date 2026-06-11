@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <spdlog/spdlog.h>
 #include "MinHook.h"
 #include "er_gamehook.h"
 
@@ -60,7 +61,11 @@ uintptr_t FindPattern(const char* pat) {
     for (const char* p = pat; *p && n < 256; ) {
         if (*p == ' ') { ++p; continue; }
         if (!parseByte(p, bytes[n], wild[n])) return 0;
-        ++n; p += (*p == '?') ? 1 : 2;
+        ++n;
+        // Advance past the whole token, whether it's "XX", "??", or a single "?". The previous
+        // (*p=='?')?1:2 advanced only 1 on a wildcard, so "??" was parsed as TWO wildcard bytes —
+        // which silently broke any pattern with mid-sequence wildcards (e.g. ParamBase).
+        while (*p && *p != ' ') ++p;
     }
     if (!n || !g_textStart) return 0;
     const uint8_t* end = g_textStart + g_textSize - n;
@@ -97,6 +102,10 @@ uint64_t Detour(void* inventory, void* entry, void* buffer, void* zero) {
 
     SyntheticItem s{};
     if (DecodeSyntheticPickup(ParamRepoInstance(), rawId, s)) {
+        // One concise line per AP pickup. The verbose per-item "AddItem detour" log and the repo
+        // scan were diagnostics for the index/deref hunt and are removed now that the loop works;
+        // the startup build stamp in Init() stays.
+        spdlog::info("AP pickup: location={} grant goods {} x{}", s.apLocationId, s.localItemId, s.localQuantity);
         Archipelago_SendLocationCheck(s.apLocationId);                  // always report the check
         if (DecidePickup(s) == PickupAction::SuppressAndGrant)
             GrantGoods(s.localItemId, s.localQuantity);                 // swap placeholder -> real item
@@ -144,8 +153,11 @@ bool SetEventFlag(uint32_t /*eventFlagId*/, bool /*on*/) {
 }
 
 bool Init() {
-    if (!LocateText()) return false;
-    if (MH_Initialize() != MH_OK) return false;
+    if (!LocateText()) { spdlog::error("er::Init LocateText failed (.text not found)"); return false; }
+    spdlog::info("er::Init .text base={:#x} start={:#x} size={:#x}",
+                 g_base, reinterpret_cast<uintptr_t>(g_textStart), g_textSize);
+
+    if (MH_Initialize() != MH_OK) { spdlog::error("er::Init MH_Initialize failed"); return false; }
 
     g_addItemTarget = FindPattern(hooks::AddItemFunc_AOB);
 
@@ -155,11 +167,24 @@ bool Init() {
     uintptr_t pbMatch = FindPattern(hooks::ParamBase_AOB);
     g_paramBasePtrLoc = RipTarget(pbMatch, /*dispOff*/3, /*instrLen*/7);    // mov rcx,[rip+disp]
 
-    if (!g_addItemTarget || !g_invPtrLoc || !g_paramBasePtrLoc) return false;
+    // Build stamp: auto-updates every compile (so a stale DLL is obvious), and prints the
+    // compiled-in PARAM_INDEX_GOODS so we can confirm constant changes actually landed.
+    spdlog::info("er::Init BUILD {} {} | PARAM_INDEX_GOODS={} | goods blob walk=double +0x80 deref",
+                 __DATE__, __TIME__, hooks::PARAM_INDEX_GOODS);
+    spdlog::info("er::Init scans: addItem={:#x} invMatch={:#x} invPtrLoc={:#x} pbMatch={:#x} paramBasePtrLoc={:#x}",
+                 g_addItemTarget, invMatch, g_invPtrLoc, pbMatch, g_paramBasePtrLoc);
+
+    if (!g_addItemTarget) { spdlog::error("er::Init AddItemFunc signature not found"); return false; }
+    if (!g_invPtrLoc)     { spdlog::error("er::Init InventoryAccessor signature not found"); return false; }
+    if (!g_paramBasePtrLoc){ spdlog::error("er::Init ParamBase signature not found"); return false; }
 
     if (MH_CreateHook(reinterpret_cast<void*>(g_addItemTarget), reinterpret_cast<void*>(&Detour),
-                      reinterpret_cast<void**>(&g_addItemOrig)) != MH_OK) return false;
-    return MH_EnableHook(reinterpret_cast<void*>(g_addItemTarget)) == MH_OK;
+                      reinterpret_cast<void**>(&g_addItemOrig)) != MH_OK) {
+        spdlog::error("er::Init MH_CreateHook failed"); return false;
+    }
+    bool ok = MH_EnableHook(reinterpret_cast<void*>(g_addItemTarget)) == MH_OK;
+    spdlog::info("er::Init AddItemFunc hook {}", ok ? "ENABLED" : "enable FAILED");
+    return ok;
 }
 
 // ---- AP receive path: grant an item the server sent to this player ------------------------
