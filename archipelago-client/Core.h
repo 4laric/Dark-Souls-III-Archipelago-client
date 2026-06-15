@@ -105,6 +105,13 @@ public:
 	// (see PollLocationFlags). Public: populated by ArchipelagoInterface at connect.
 	std::unordered_map<int64_t, std::vector<int64_t>> dungeonSweeps;
 
+	// Boss attribution (apconfig.json "sweep_flags", SPEC-boss-attribution.md): event flag
+	// (boss DefeatFlag OR Site-of-Grace lit flag) -> AP location ids attributed to it. A
+	// location may appear under several flags; when ANY fires, its members are sent (first
+	// trigger wins, flagSentLocations dedupes). Unlike dungeonSweeps this is keyed by the
+	// event flag directly, so no locationFlags indirection. Populated in LoadConfigFile.
+	std::unordered_map<uint32_t, std::vector<int64_t>> sweepFlags;
+
 	// Goal locations for ending_condition 2/3 (slot_data "goalLocations"): the goal
 	// completes when ALL of these are checked (server-side truth). Empty for ec 0/1,
 	// which use boss defeat flags instead (CGameHook::isSoulOfCinderDefeated).

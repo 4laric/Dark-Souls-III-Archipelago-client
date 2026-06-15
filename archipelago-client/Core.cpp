@@ -690,6 +690,18 @@ void CCore::LoadConfigFile() {
 			}
 			spdlog::info("Loaded {} location flags for check polling", locationFlags.size());
 		}
+		// Boss attribution sweep map (apconfig.json "sweep_flags", SPEC-boss-attribution.md):
+		// event flag (boss DefeatFlag or grace lit flag) -> AP location ids. Present only when
+		// the apworld's dungeon_sweep == bosses. Polled in PollLocationFlags alongside the
+		// per-location flags. Absent/ignored for other sweep modes.
+		if (configData.contains("sweep_flags")) {
+			for (auto& [flagStr, locs] : configData["sweep_flags"].items()) {
+				uint32_t flag = static_cast<uint32_t>(std::stoul(flagStr));
+				auto& bucket = sweepFlags[flag];
+				for (auto& loc : locs) bucket.push_back(loc.get<int64_t>());
+			}
+			spdlog::info("Loaded {} boss/grace sweep flags", sweepFlags.size());
+		}
 		if (configData.contains("version") && configData["version"].get<std::string>() != VERSION)
 		{
 			throw std::runtime_error(
@@ -789,6 +801,24 @@ VOID CCore::PollLocationFlags() {
 		}
 		if (swept > 0) {
 			spdlog::info("Dungeon sweep: boss at location {} cleared {} remaining check(s)", sweep.first, swept);
+		}
+	}
+
+	// Boss attribution sweep (SPEC-boss-attribution.md): sweep_flags is keyed by the event flag
+	// itself (a boss DefeatFlag or a Site-of-Grace lit flag), so we read each flag directly --
+	// no locationFlags indirection. A location can appear under several flags; flagSentLocations
+	// dedupes, so it sends on whichever fires first (boss killed OR grace lit).
+	for (const auto& sweep : sweepFlags) {
+		if (!er_ap::game::GetEventFlagState(sweep.first)) continue;
+		int swept = 0;
+		for (int64_t member : sweep.second) {
+			if (flagSentLocations.count(member)) continue;
+			flagSentLocations.insert(member);
+			Archipelago_SendLocationCheck(member);
+			swept++;
+		}
+		if (swept > 0) {
+			spdlog::info("Boss/grace sweep: flag {} cleared {} check(s)", sweep.first, swept);
 		}
 	}
 }
