@@ -12,6 +12,7 @@ public:
 	BOOL Initialise(std::string URI);
 	VOID say(std::string message);
 	BOOLEAN isConnected();
+	BOOLEAN isGoalComplete();
 	VOID update();
 	VOID gameFinished();
 	VOID sendDeathLink();

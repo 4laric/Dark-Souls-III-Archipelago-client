@@ -8,6 +8,7 @@
 
 #include "GameHook.h"
 #include "ItemRandomiser.h"
+#include "er_gamehook.h"
 
 CCore* Core;
 CGameHook* GameHook;
@@ -124,7 +125,10 @@ void CCore::on_attach() {
 
 	// Set up the client console
 	modEngineDebug = !AllocConsole();
-	SetConsoleTitleA("Dark Souls III - Archipelago Console");
+	SetConsoleTitleA("Elden Ring - Archipelago Console");
+	// AP strings are UTF-8 (location names like "Kalé Shop"); without this the console
+	// decodes them as the OEM codepage and prints mojibake ("Kal├⌐").
+	SetConsoleOutputCP(CP_UTF8);
 	FILE* fp;
 	freopen_s(&fp, "CONIN$", "r", stdin);
 
@@ -293,8 +297,22 @@ bool CCore::PromptYN(std::string message, bool defaultResponse)
 {
 	std::cout << message << " [" << (defaultResponse ? "Y" : "y") << "/"
 		<< (defaultResponse ? "n" : "N") << "] ";
-	wint_t response = _getwch();
-	if (response != WEOF) std::wcout << (wchar_t)response;
+	// Auto-answer with the default after 10s of no input. Without this, the saved-config
+	// "Reconnect?" prompt blocked _getwch() forever, so the init countdown finished but the
+	// connection never started until someone typed Y (autoconnect dev loop + unattended use).
+	wint_t response = WEOF;
+	for (int waitedMs = 0; waitedMs < 10000; waitedMs += 100) {
+		if (_kbhit()) {
+			response = _getwch();
+			break;
+		}
+		Sleep(100);
+	}
+	if (response == WEOF) {
+		std::cout << "(auto: " << (defaultResponse ? "Y" : "N") << ")" << std::endl;
+		return defaultResponse;
+	}
+	std::wcout << (wchar_t)response;
 	std::cout << std::endl;
 	return defaultResponse
 		? (response != 'n' && response != 'N')
@@ -405,12 +423,112 @@ VOID CCore::Run() {
 
 			GameHook->manageDeathLink();
 
-			if (!ItemRandomiser->receivedItemsQueue.empty()) {
-				pLastReceivedIndex++;
-				GameHook->GiveNextItem();
+			// Pace grants so the native "item acquired" popup doesn't bury the HUD. The client
+			// renders NO UI of its own (showBanner is a no-op — verified 2026-06-13: no draw/D3D/
+			// ImGui/overlay code in the client); each granted item fires the VANILLA acquisition
+			// popup as a side effect of GrantFullID. A fresh connect's starting inventory (e.g. 19
+			// region maps) used to dump all 19 popups within ~2 ticks and cover the screen. We now
+			// cap grants per 2s tick AND space them out, so popups appear in a readable trickle and
+			// earlier ones fade before new ones pile on. Tuned for the worst case (the starting
+			// flood); normal mid-game receives are 1-3 items and still clear in a single tick.
+			// (Suppressing/replacing the native popup outright is a separate, bigger brief — the
+			// TODO #11 follow-up; this is the pure-pacing fix.)
+			//
+			// CRITICAL: only drain while the player is actually in-world. At the main menu
+			// InventoryInstance() is null and GrantItem() silently no-ops, but the index
+			// still advanced — with batching, a connect at the menu burned the entire
+			// starting inventory (all 19 maps) into the void in ~2 ticks. Hold the queue
+			// until grants can land; items stay pending and deliver on load-in.
+			if (er_ap::game::InventoryInstance() != 0) {
+				// Region-lock unlock NOTIFICATION: a lock is invisible (sentinel 99999); on receipt we grant
+				// the region's Map fragment (or token) HERE so the native item ticker fires + names the region.
+				if (!pendingNotifyGrants.empty()) {
+					for (int32_t addr : pendingNotifyGrants)
+						er_ap::game::GrantFullID(addr, 1);
+					spdlog::info("Region-lock: granted {} unlock-notify item(s)", pendingNotifyGrants.size());
+					pendingNotifyGrants.clear();
+				}
+				// Pace grants so a burst doesn't flood the native item-gain ticker all at once. The queue
+				// persists across ticks, so this only spaces delivery; it never drops items. (Boss-defer was
+				// removed once the blocking acquisition modal was suppressed game-wide via showDialogCondType=0
+				// -- the ticker is non-blocking, so grants no longer wait for boss fights. See SPEC-notify-banner.md.)
+				static constexpr int kMaxGrantsPerTick  = 5;
+				static constexpr int kInterGrantDelayMs = 350;
+				int grantedThisTick = 0;
+				while (!ItemRandomiser->receivedItemsQueue.empty() && grantedThisTick < kMaxGrantsPerTick) {
+					pLastReceivedIndex++;
+					GameHook->GiveNextItem();
+					grantedThisTick++;
+					// Space deliveries within the tick; skip the wait after the burst's last grant.
+					if (grantedThisTick < kMaxGrantsPerTick && !ItemRandomiser->receivedItemsQueue.empty())
+						Sleep(kInterGrantDelayMs);
+				}
 			}
 
-			if (GameHook->isSoulOfCinderDefeated() && sendGoalStatus) {
+			// ER port: upstream persisted last_received_index inside the native DS3 save, but
+			// that hook is stubbed here, so writeSaveFileNextTick had NO consumer — the index
+			// was never written and every reconnect re-granted all received items (e.g. the
+			// starting-inventory maps). Persist it to the JSON save file instead (the same file
+			// LoadSaveFile() reads-then-deletes at startup). Tradeoff vs native-save sync: if
+			// the game crashes before its own save after a grant, that item is skipped on the
+			// next connect.
+			if (writeSaveFileNextTick) {
+				writeSaveFileNextTick = false;
+				WriteSaveFile();
+			}
+
+			// Detect checks whose acquisition path bypassed the AddItemFunc detour (shop
+			// purchases, NPC gifts, offline pickups) by polling each AP location's guarding
+			// event flag. Duplicate sends across sessions are harmless: the AP server treats
+			// location checks idempotently, and this doubles as a resync after offline play.
+			// Map reveal (beta.3): under map_option=give the apworld grants no map items; set every
+			// region's reveal flag here instead. Retried each tick until the event-flag holder is
+			// ready; one-shot per connect (the handler re-arms it on reconnect). See TODO #5.
+			if (revealAllMapsPending && GameHook->revealAllMaps(GameHook->dEnableDLC != FALSE)) {
+				revealAllMapsPending = false;
+			}
+
+			// Region-fusion: set any queued grace warp-unlock flags (drained here, on a loaded
+			// tick, because the event-flag setter is only valid in-world). See SPEC-region-chain.md.
+			FlushPendingGraceFlags();
+
+			PollLocationFlags();
+
+			// Region-lock enforcement poll (play-region/fog-gate pivot). The open world doesn't fire
+			// IF-In-Area on dynamically-added MSB regions, so detection lives here -- the player's area
+			// id (the FieldArea mapNameId, same signal that draws the area-name banner). Generalized via
+			// the slot_data areaLockFlags range table; in a locked area with its open-flag off, set KICK
+			// (76970) -> the baked common.emevd reactor warps the player out to a safe Limgrave grace.
+			{
+				static int32_t lastPlayRegion = -2;
+				static bool kickLatched = false;  // kicked once per locked-region stay; re-arms on leaving
+				int32_t pr = er_ap::game::GetPlayRegionId();
+				// Generalized detection: locked iff the current area-name id (FieldArea mapNameId; 61002=
+				// Weeping, 62xxx=Liurnia, 63xxx=Caelid, 64xxx=Altus) falls in a locked range whose open-flag
+				// is off. Table = slot_data areaLockFlags ({lo,hi,open_flag}).
+				// Normalize: overworld sub-areas report a 7-digit id (subregion*100, e.g. 6100300); the major
+				// area reports the 5-digit subregion (61002). Reduce to the 5-digit subregion for range match.
+				int32_t sub = (pr >= 1000000) ? pr / 100 : pr;
+				bool locked = false;
+				for (const auto& e : areaLockFlags) {
+					if (e.size() >= 3 && sub >= e[0] && sub <= e[1] && !er_ap::game::GetEventFlagState((uint32_t)e[2])) {
+						locked = true; break;
+					}
+				}
+				if (pr != lastPlayRegion) {
+					lastPlayRegion = pr;
+					spdlog::info("RegionLock: area={}{}", pr, locked ? "  [LOCKED -> KICK]" : "");
+				}
+				// Set KICK_FLAG (76970) ONCE per entry (latch); re-arm on leaving. Avoids a death loop when
+				// respawn lands inside a locked region. Baked common.emevd reactor warps the player out.
+				if (!locked) kickLatched = false;
+				else if (!kickLatched) { kickLatched = true; er_ap::game::SetEventFlag(76970, true); }
+			}
+
+			// Goal: ec 0/1 detect via boss defeat flag; ec 2/3 via all goal locations
+			// checked (server-side, so reconnects complete retroactively).
+			if ((GameHook->isSoulOfCinderDefeated() || ArchipelagoInterface->isGoalComplete())
+					&& sendGoalStatus) {
 				sendGoalStatus = false;
 				ArchipelagoInterface->gameFinished();
 			}
@@ -507,10 +625,18 @@ VOID CCore::InputCommand() {
 			GameHook->itemGib(std::stoi(param));
 		}
 
+		if (line.find("/itemUngib ") == 0) {
+			// Test the bag-removal path on a known goods id (e.g. a lingering placeholder token).
+			std::string param = line.substr(11);
+			std::cout << "/itemUngib executed with " << param << "\n";
+			GameHook->removeFromInventory(4, std::stoi(param), 1);
+		}
+
 		if (line.find("/give ") == 0) {
 			std::string param = line.substr(6);
 			std::cout << "/give executed with " << param << "\n";
-			ItemRandomiser->receivedItemsQueue.push_front(std::stoi(param));
+			ItemRandomiser->receivedItemsQueue.push_front(
+				{ static_cast<DWORD>(std::stoi(param)), 1u, std::string(), std::string("(debug /give)"), true });
 		}
 
 		if (line.find("/save") == 0) {
@@ -555,6 +681,15 @@ void CCore::LoadConfigFile() {
 
 	try {
 		gameFile >> configData;
+		// AP-location -> in-game event flag map, emitted by the ER randomizer bake. Polled each
+		// tick to detect checks that bypass the AddItemFunc detour (shop purchases, NPC gifts,
+		// pickups made while disconnected).
+		if (configData.contains("location_flags")) {
+			for (auto& [locIdStr, flag] : configData["location_flags"].items()) {
+				locationFlags[std::stoll(locIdStr)] = flag.get<uint32_t>();
+			}
+			spdlog::info("Loaded {} location flags for check polling", locationFlags.size());
+		}
 		if (configData.contains("version") && configData["version"].get<std::string>() != VERSION)
 		{
 			throw std::runtime_error(
@@ -606,6 +741,9 @@ void CCore::LoadSaveFile() {
 		);
 	}
 
+	// Close the read handle before deleting — DeleteFileW fails with a sharing violation while
+	// the ifstream is still open (seen live: "being used by another process").
+	gameFile.close();
 	spdlog::debug("Deleting {}", savePath.string());
 	if (!DeleteFileW(WindowsLongPath(savePath).c_str())) {
 		auto text = GetLastWin32ErrorText();
@@ -614,6 +752,92 @@ void CCore::LoadSaveFile() {
 			? "Could not delete " + savePath.string() + ": " + text.value()
 			: "Could not delete " + savePath.string() + "."
 		);
+	}
+};
+
+// ER port: poll the event flag guarding each AP location and send checks for newly set flags.
+// Catches every acquisition path the AddItemFunc detour misses. See location_flags loading in
+// LoadConfigFile and the GetEventFlagState binding in er_gamehook_win.cpp.
+VOID CCore::PollLocationFlags() {
+	if (locationFlags.empty()) return;
+	int sent = 0;
+	for (const auto& entry : locationFlags) {
+		if (flagSentLocations.count(entry.first)) continue;
+		if (!er_ap::game::GetEventFlagState(entry.second)) continue;
+		flagSentLocations.insert(entry.first);
+		Archipelago_SendLocationCheck(entry.first);
+		sent++;
+	}
+	if (sent > 0) {
+		spdlog::info("Flag polling: sent {} location check(s)", sent);
+	}
+
+	// Dungeon sweep (opt-in, SPEC-dungeon-sweep.md): when a dungeon's trigger (mainboss
+	// drop) location flag fires, send every remaining check in that dungeon. Triggers are
+	// boss-drop lots, so their guarding flags are already in locationFlags. Server-side
+	// checks are idempotent and flagSentLocations dedupes, so re-evaluation is cheap.
+	for (const auto& sweep : dungeonSweeps) {
+		auto flagIt = locationFlags.find(sweep.first);
+		if (flagIt == locationFlags.end()) continue;   // trigger unknown to this bake; skip
+		if (!er_ap::game::GetEventFlagState(flagIt->second)) continue;
+		int swept = 0;
+		for (int64_t member : sweep.second) {
+			if (flagSentLocations.count(member)) continue;
+			flagSentLocations.insert(member);
+			Archipelago_SendLocationCheck(member);
+			swept++;
+		}
+		if (swept > 0) {
+			spdlog::info("Dungeon sweep: boss at location {} cleared {} remaining check(s)", sweep.first, swept);
+		}
+	}
+}
+
+// Region-fusion (SPEC-region-chain.md): drain pendingGraceFlags, calling SetEventFlag for each
+// queued grace warp-unlock flag so the matching region's Sites of Grace light up for fast
+// travel. Called only from the loaded isInit block (event-flag setter is valid in-world).
+// SetEventFlag is idempotent and the flag persists in the game save, so re-applying on a
+// reconnect/replay is harmless — no last_received_index dedup needed. graceFlagsSetThisSession
+// suppresses redundant calls + log noise within a session. If SetEventFlag returns false the
+// holder isn't ready yet, so the flag is re-queued and retried next tick.
+VOID CCore::FlushPendingGraceFlags() {
+	if (pendingGraceFlags.empty()) return;
+	std::vector<uint32_t> retry;
+	int setCount = 0;
+	for (uint32_t flag : pendingGraceFlags) {
+		if (graceFlagsSetThisSession.count(flag)) continue;   // already set this session
+		bool ok = er_ap::game::SetEventFlag(flag, true);
+		if (ok) {
+			graceFlagsSetThisSession.insert(flag);
+			setCount++;
+			spdlog::info("Region grace flag {} SET", flag);
+		} else {
+			retry.push_back(flag);   // holder not ready; try again next tick
+		}
+	}
+	pendingGraceFlags.swap(retry);
+	if (setCount > 0) {
+		spdlog::info("Region fusion: set {} grace warp flag(s) ({} pending)", setCount, pendingGraceFlags.size());
+	}
+}
+
+// ER port: persist last_received_index to the JSON save file after each grant (see the
+// writeSaveFileNextTick consumer in Run). LoadSaveFile() reads and deletes this at startup.
+void CCore::WriteSaveFile() {
+	if (savePath.empty()) {
+		spdlog::warn("WriteSaveFile called before save path was initialized; skipping");
+		return;
+	}
+	try {
+		json k;
+		k["last_received_index"] = pLastReceivedIndex;
+		std::ofstream gameFile{ WindowsLongPath(savePath) };
+		gameFile << k;
+		gameFile.close();
+		spdlog::debug("Wrote last_received_index={} to {}", pLastReceivedIndex, savePath.string());
+	}
+	catch (const std::exception& error) {
+		spdlog::warn("Failed to write {}: {}", savePath.string(), error.what());
 	}
 };
 
@@ -656,4 +880,3 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 	}
 	return TRUE;
 }
-

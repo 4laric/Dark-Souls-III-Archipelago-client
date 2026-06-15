@@ -20,12 +20,14 @@ int main() {
     // allocate the fake structures (zeroed)
     uint8_t* repo = (uint8_t*)calloc(1, 0x400);
     uint8_t* cap  = (uint8_t*)calloc(1, 0x200);
+    uint8_t* mid  = (uint8_t*)calloc(1, 0x200);    // intermediate struct: GetParam derefs +0x80 TWICE
     uint8_t* blob = (uint8_t*)calloc(1, 0x2000);
 
     // repo + goods_index*0x48 + 0x88  ->  cap        (the ParamResCap pointer for EquipParamGoods)
     wrptr(repo, (size_t)PARAM_INDEX_GOODS * PARAM_ENTRY_STRIDE + PARAM_ENTRY_OFF, cap);
-    // cap + 0x80  ->  blob                            (the PARAM file blob)
-    wrptr(cap, PARAM_HEADER_DEREF, blob);
+    // cap + 0x80  ->  mid  ;  mid + 0x80  ->  blob    (GetParam derefs +0x80 twice; see er_gamehook.h)
+    wrptr(cap, PARAM_HEADER_DEREF, mid);
+    wrptr(mid, PARAM_HEADER_DEREF, blob);
 
     // blob row index: rowCount @ 0x0A; 24-byte entries @ 0x40 (id @ +0, dataOffset @ +8)
     wr16(blob, PARAM_ROWCOUNT_OFF, 2);
@@ -77,6 +79,6 @@ int main() {
     CHECK(!DecodeSyntheticPickup(REPO, CATEGORY_GOODS | 4000001u, dummy) == false); // sanity: this one IS synthetic
 
     std::printf("\n%d passed, %d failed\n", pass, fail);
-    free(repo); free(cap); free(blob);
+    free(repo); free(cap); free(mid); free(blob);
     return fail ? 1 : 0;
 }

@@ -4,6 +4,12 @@
 #include "ArchipelagoInterface.h"
 #include "ItemRandomiser.h"
 #include "subprojects/apclientpp/apuuid.hpp"
+#include "er_version_check.h"
+
+// Client's implemented slot_data CONTRACT version (beta.N lockstep with the apworld range and the
+// randomizer). Checked (advisory) against slot_data["versions"] at connect. Flips to a release at
+// freeze. See BRIEF-contract-map-reveal / er_version_check.h.
+static constexpr const char* ER_CLIENT_CONTRACT_VERSION = "0.1.0-beta.3";
 
 #ifdef __EMSCRIPTEN__
 #define DATAPACKAGE_CACHE "/settings/datapackage.json"
@@ -47,16 +53,28 @@ BOOL CArchipelago::Initialise(std::string URI) {
 			Core->Panic("Please check the following values : [apItemsToItemIds], [seed] and [slot]", "One of the mandatory values is missing in the slot data", AP_MissingValue, 1);
 		}
 
+		// Contract version (beta.3): WARN (don't refuse) if our implemented version isn't in the
+		// server's range -- advisory lockstep, see BRIEF-contract-map-reveal. The randomizer also
+		// checks at bake; hardening this to a refusal is a follow-up once the client build is tested.
+		if (data.contains("versions")) {
+			std::string verRange = data.at("versions").get<std::string>();
+			if (!er_ap::versionSatisfies(ER_CLIENT_CONTRACT_VERSION, verRange)) {
+				spdlog::warn("Contract mismatch: client {} not in server range {} -- update one side.",
+					ER_CLIENT_CONTRACT_VERSION, verRange);
+				GameHook->showBanner("Archipelago contract version mismatch -- see log");
+			}
+		}
+
 		std::map<std::string, DWORD> map;
 		data.at("apIdsToItemIds").get_to(map);
 		for (std::map<std::string, DWORD>::iterator it = map.begin(); it != map.end(); ++it) {
-			ItemRandomiser->pApItemsToItemIds[std::stol(it->first)] = it->second;
+			ItemRandomiser->pApItemsToItemIds[std::stoll(it->first)] = it->second;
 		}
 
 		map.clear();
 		data.at("itemCounts").get_to(map);
 		for (std::map<std::string, DWORD>::iterator it = map.begin(); it != map.end(); ++it) {
-			ItemRandomiser->pItemCounts[std::stol(it->first)] = it->second;
+			ItemRandomiser->pItemCounts[std::stoll(it->first)] = it->second;
 		}
 		
 		data.at("slot").get_to(Core->pSlotName);
@@ -66,11 +84,109 @@ BOOL CArchipelago::Initialise(std::string URI) {
 			(data.at("options").contains("lock_equip")) ? (data.at("options").at("lock_equip").get_to(GameHook->dLockEquipSlots)) : GameHook->dLockEquipSlots = false;
 			(data.at("options").contains("death_link")) ? (data.at("options").at("death_link").get_to(GameHook->dIsDeathLink)) : GameHook->dIsDeathLink = false;
 			(data.at("options").contains("enable_dlc")) ? (data.at("options").at("enable_dlc").get_to(GameHook->dEnableDLC)) : GameHook->dEnableDLC = false;
+			// ER goal detection: which ending completes the slot (see isSoulOfCinderDefeated).
+			(data.at("options").contains("ending_condition")) ? (data.at("options").at("ending_condition").get_to(GameHook->dEndingCondition)) : GameHook->dEndingCondition = 1;
+		}
+
+		// Goal locations (optional; nonempty for ending_condition 2/3): goal = all checked.
+		Core->goalLocations.clear();
+		if (data.contains("goalLocations")) {
+			data.at("goalLocations").get_to(Core->goalLocations);
+			if (!Core->goalLocations.empty()) {
+				spdlog::info("Goal: complete all {} goal locations (ending_condition {})",
+					Core->goalLocations.size(), GameHook->dEndingCondition);
+			}
+		}
+
+		// Dungeon sweep map (optional; present when the apworld's dungeon_sweep option is on):
+		// trigger location id -> all location ids in that dungeon. See CCore::PollLocationFlags.
+		Core->dungeonSweeps.clear();
+		if (data.contains("dungeonSweeps")) {
+			std::map<std::string, std::vector<int64_t>> sweepMap;
+			data.at("dungeonSweeps").get_to(sweepMap);
+			for (const auto& entry : sweepMap) {
+				Core->dungeonSweeps[std::stoll(entry.first)] = entry.second;
+			}
+			if (!Core->dungeonSweeps.empty()) {
+				spdlog::info("Dungeon sweep enabled for {} dungeon(s)", Core->dungeonSweeps.size());
+			}
+		}
+
+		// Region-fusion grace bundle (optional; present only when region gating is active —
+		// apworld world_logic < 3): lock-item name -> grace warp-unlock flags. The received-items
+		// handler queues these flags when the matching lock item arrives, and
+		// CCore::FlushPendingGraceFlags sets them on an in-game tick so the region's Sites of
+		// Grace become fast-travelable. See SPEC-region-chain.md.
+		Core->regionGraces.clear();
+		if (data.contains("regionGraces")) {
+			data.at("regionGraces").get_to(Core->regionGraces);
+			if (!Core->regionGraces.empty()) {
+				spdlog::info("Region grace bundle: {} region(s) will unlock graces on lock-item receipt",
+					Core->regionGraces.size());
+			}
+		}
+
+		// Region-open flags (physical enforcement; SPEC-region-fog-gates.md): lock-item name -> one
+		// flag set on receipt, gated on by baked border fog gates. Parsed alongside regionGraces;
+		// set through the same pendingGraceFlags drain.
+		Core->regionOpenFlags.clear();
+		if (data.contains("regionOpenFlags")) {
+			data.at("regionOpenFlags").get_to(Core->regionOpenFlags);
+			if (!Core->regionOpenFlags.empty()) {
+				spdlog::info("Region-open flags: {} region(s) will open on lock-item receipt",
+					Core->regionOpenFlags.size());
+			}
+		}
+		Core->areaLockFlags.clear();
+		if (data.contains("areaLockFlags")) {
+			data.at("areaLockFlags").get_to(Core->areaLockFlags);
+			if (!Core->areaLockFlags.empty())
+				spdlog::info("Region-lock: {} area range(s) enforced (generalized detection)", Core->areaLockFlags.size());
+		}
+		Core->lockRevealFlags.clear();
+		if (data.contains("lockRevealFlags")) {
+			data.at("lockRevealFlags").get_to(Core->lockRevealFlags);
+			if (!Core->lockRevealFlags.empty())
+				spdlog::info("Region-lock: {} lock(s) reveal/open on receipt", Core->lockRevealFlags.size());
+		}
+		Core->lockNotifyItems.clear();
+		if (data.contains("lockNotifyItems")) {
+			data.at("lockNotifyItems").get_to(Core->lockNotifyItems);
+			if (!Core->lockNotifyItems.empty())
+				spdlog::info("Region-lock: {} lock(s) grant an unlock-notify item", Core->lockNotifyItems.size());
+		}
+		// Limgrave start graces: queue them at connect so the free starting region is fully fast-
+		// travelable from load-in (drained by FlushPendingGraceFlags like the on-receipt grace bundle).
+		if (data.contains("startGraces")) {
+			std::vector<uint32_t> _sg;
+			data.at("startGraces").get_to(_sg);
+			for (uint32_t _f : _sg) Core->pendingGraceFlags.push_back(_f);
+			if (!_sg.empty())
+				spdlog::info("Region-lock: queued {} Limgrave start grace(s)", _sg.size());
+		}
+		// Start items (e.g. Spectral Steed Whistle = Torrent): grant once at load-in via the same
+		// in-world grant queue as the unlock-notify items.
+		if (data.contains("startItems")) {
+			std::vector<int32_t> _si;
+			data.at("startItems").get_to(_si);
+			for (int32_t _a : _si) Core->pendingNotifyGrants.push_back(_a);
+			if (!_si.empty())
+				spdlog::info("Region-lock: queued {} start item(s)", _si.size());
+		}
+
+		// Map reveal (slot_data "reveal_all_maps"; beta.3): under map_option=give the apworld grants
+		// no map fragment items -- the client sets every region's map-reveal flag directly. One-shot
+		// per connect, drained on a loaded tick in CCore::Run (retried until the flag holder is
+		// ready). See BRIEF-contract-map-reveal / TODO #5.
+		Core->revealAllMapsPending = false;
+		if (data.contains("reveal_all_maps") && data.at("reveal_all_maps").get<bool>()) {
+			Core->revealAllMapsPending = true;
+			spdlog::info("reveal_all_maps: will reveal all region maps (no map items granted)");
 		}
 
 		std::list<std::string> tags;
-		if (GameHook->dIsDeathLink) { 
-			tags.push_back("DeathLink"); 
+		if (GameHook->dIsDeathLink) {
+			tags.push_back("DeathLink");
 			ap->ConnectUpdate(false, 1, true, tags);
 		}
 
@@ -95,7 +211,13 @@ BOOL CArchipelago::Initialise(std::string URI) {
 	ap->set_room_info_handler([]() {
 		std::list<std::string> tags;
 		if (GameHook->dIsDeathLink) { tags.push_back("DeathLink"); }
-		ap->ConnectSlot(Core->pSlotName, Core->pPassword, 5, tags, { 0,6,6 });
+		// items_handling 0b111: remote items + OWN-WORLD items + starting inventory. Own-world
+		// echo is essential for ER: acquisitions that bypass the AddItemFunc detour (shop
+		// purchases, detected via flag polling) can't grant locally, so ALL items — including
+		// self-found ones — are granted through the server's ReceivedItems stream, deduped by
+		// the persisted last_received_index. (Was 5 = no own-world echo: a shop-bought
+		// self-item sent the check but the item never arrived.)
+		ap->ConnectSlot(Core->pSlotName, Core->pPassword, 7, tags, { 0,6,6 });
 		});
 
 	ap->set_items_received_handler([](const std::list<APClient::NetworkItem>& items) {
@@ -114,6 +236,65 @@ BOOL CArchipelago::Initialise(std::string URI) {
 
 			spdlog::info("#{}: {} from {} - {}", item.index, itemname, sender, location);
 
+			// Region-fusion: if this item is a region lock key, queue its grace warp-unlock flags
+			// for CCore::FlushPendingGraceFlags to set on the next in-game tick. Done HERE, not in
+			// the grant path, because every region-lock key shares sentinel er_code 99999 and is
+			// indistinguishable by GiveNextItem — the item NAME (region identity) only exists here.
+			// SetEventFlag is idempotent + save-persisted, so re-queuing on reconnect is harmless.
+			auto graceIt = Core->regionGraces.find(itemname);
+			if (graceIt != Core->regionGraces.end()) {
+				for (uint32_t flag : graceIt->second) {
+					Core->pendingGraceFlags.push_back(flag);
+				}
+				spdlog::info("Region lock '{}' received: queued {} grace flag(s)",
+					itemname, graceIt->second.size());
+			}
+
+			// Region-fusion (physical): also queue the region-open flag so baked border fog gates
+			// drop. Same queue/drain as the grace flags (SetEventFlag, idempotent + save-persisted).
+			auto openIt = Core->regionOpenFlags.find(itemname);
+			if (openIt != Core->regionOpenFlags.end()) {
+				Core->pendingGraceFlags.push_back(openIt->second);
+				spdlog::info("Region lock '{}' received: queued region-open flag {}",
+					itemname, openIt->second);
+			}
+			// Generalized open-state: setting the region's map-reveal flags both reveals the map and
+			// flips the enforcement open-flag (reveal_flags[0]) so the kick check stops -> region opens.
+			auto revealIt = Core->lockRevealFlags.find(itemname);
+			if (revealIt != Core->lockRevealFlags.end()) {
+				for (int32_t flag : revealIt->second)
+					Core->pendingGraceFlags.push_back((uint32_t)flag);
+				spdlog::info("Region lock '{}' received: queued {} map-reveal/open flag(s)",
+					itemname, revealIt->second.size());
+			}
+			// Unlock NOTIFICATION: queue the region's map/token grant so the native ticker fires on a
+			// loaded tick (in-world) and tells the player WHICH region just opened.
+			auto notifyIt = Core->lockNotifyItems.find(itemname);
+			if (notifyIt != Core->lockNotifyItems.end())
+				Core->pendingNotifyGrants.push_back(notifyIt->second);
+
+			// Companion acquisition flags: itemname -> vanilla "obtained" event flag(s) that gate NPC/
+			// shop/tutorial behavior a raw client grant never trips. Setting them fires the item's
+			// tutorial and stops the Twin Maiden Husks re-selling it (their ESD checks these flags).
+			// Same drain as the region flags above (FlushPendingGraceFlags -> SetEventFlag, idempotent
+			// + save-persisted). Add an entry here for any future possession-gated companion item.
+			static const std::unordered_map<std::string, std::vector<uint32_t>> kCompanionAcquireFlags = {
+				{ "Spirit Calling Bell", { 60110u } },  // summon tutorial + Twin Maiden dup-sale
+				{ "Whetstone Knife",     { 60130u } },  // Ashes of War tutorial + Twin Maiden dup-sale
+				{ "Iron Whetblade",      { 65610u } },  // unlocks affinities (aux flags) + dup-sale
+				{ "Red-Hot Whetblade",   { 65640u } },
+				{ "Sanctified Whetblade",{ 65660u } },
+				{ "Glintstone Whetblade",{ 65680u } },
+				{ "Black Whetblade",     { 65720u } },
+			};
+			auto compIt = kCompanionAcquireFlags.find(itemname);
+			if (compIt != kCompanionAcquireFlags.end()) {
+				for (uint32_t flag : compIt->second)
+					Core->pendingGraceFlags.push_back(flag);
+				spdlog::info("Companion item '{}' received: queued {} acquisition flag(s)",
+					itemname, compIt->second.size());
+			}
+
 			//Determine the item address
 			auto ds3IdSearch = ItemRandomiser->pApItemsToItemIds.find(item.item);
 			if (ds3IdSearch == ItemRandomiser->pApItemsToItemIds.end()) {
@@ -124,7 +305,10 @@ BOOL CArchipelago::Initialise(std::string URI) {
 			auto countSearch = ItemRandomiser->pItemCounts.find(item.item);
 			ItemRandomiser->receivedItemsQueue.push_front({
 				ds3IdSearch->second,
-				countSearch == ItemRandomiser->pItemCounts.end() ? 1 : countSearch->second
+				countSearch == ItemRandomiser->pItemCounts.end() ? 1 : countSearch->second,
+				sender,                                  // Notify v2: source shown at grant time
+				itemname,                                // AP canonical item name (verbatim)
+				item.player == ap->get_player_number()   // self-found -> notification drops the "from"
 			});
 		}
 		});
@@ -136,9 +320,25 @@ BOOL CArchipelago::Initialise(std::string URI) {
 		GameHook->showBanner(msg);
 		});
 
-	ap->set_print_json_handler([](const std::list<APClient::TextNode>& msg) {
-		auto message = ap->render_json(msg, APClient::RenderFormat::TEXT);
-		spdlog::info(message);
+	ap->set_print_json_handler([](const APClient::PrintJSONArgs& args) {
+		// Log every server message (the AP item/chat/hint feed), as before.
+		spdlog::info(ap->render_json(args.data, APClient::RenderFormat::TEXT));
+
+		// OUTGOING notification (notify v2): when WE checked a location whose item belongs to
+		// ANOTHER player, surface "Sent <item> to <player>". In an ItemSend, item->player is the
+		// finder (us) and 'receiving' is the recipient; the item lives in the recipient's world, so
+		// resolve its name with the recipient's game. Self-found and incoming are handled elsewhere
+		// (the items_received 'X from Y' path), so exclude receiving == us.
+		if (args.type == "ItemSend" && args.item && args.receiving) {
+			int me = ap->get_player_number();
+			if (args.item->player == me && *args.receiving != me) {
+				std::string itemName  = ap->get_item_name(args.item->item, ap->get_player_game(*args.receiving));
+				std::string recipient = ap->get_player_alias(*args.receiving);
+				spdlog::info("Sent {} to {}", itemName, recipient);
+				// TODO(banner): also show this on-screen. Fine as a banner for outgoing (not mid-fight
+				// when sending). Needs the dynamic-text mechanism (runtime FMG) -- see SPEC-notify-banner.md.
+			}
+		}
 		});
 
 	ap->set_bounced_handler([](const json& cmd) {
@@ -179,9 +379,34 @@ VOID CArchipelago::say(std::string message) {
 	}
 }
 
+// Tell the server the goal is complete (CLIENT_GOAL), with logging.
+VOID CArchipelago::gameFinished() {
+	if (ap && ap->get_state() == APClient::State::SLOT_CONNECTED) {
+		if (ap->StatusUpdate(APClient::ClientStatus::GOAL)) {
+			spdlog::info("GOAL COMPLETE! Sent CLIENT_GOAL to the server");
+		}
+		else {
+			spdlog::warn("Failed to send CLIENT_GOAL status update");
+		}
+	}
+}
+
 
 BOOLEAN CArchipelago::isConnected() {
 	return ap && ap->get_state() == APClient::State::SLOT_CONNECTED;
+}
+
+// ending_condition 2/3 goal: every goal location checked (server-side truth, so this
+// also completes retroactively on reconnect). False whenever goalLocations is empty
+// (ec 0/1 use boss defeat flags via CGameHook::isSoulOfCinderDefeated instead).
+BOOLEAN CArchipelago::isGoalComplete() {
+	if (!ap || ap->get_state() != APClient::State::SLOT_CONNECTED) return false;
+	if (Core->goalLocations.empty()) return false;
+	const std::set<int64_t> checked = ap->get_checked_locations();
+	for (int64_t loc : Core->goalLocations) {
+		if (!checked.count(loc)) return false;
+	}
+	return true;
 }
 
 VOID CArchipelago::update() {
@@ -198,10 +423,6 @@ VOID CArchipelago::update() {
 			spdlog::debug("{} checks have not been sent and will be kept in queue", size);
 		}
 	}
-}
-
-VOID CArchipelago::gameFinished() {
-	if (ap) ap->StatusUpdate(APClient::ClientStatus::GOAL);
 }
 
 VOID CArchipelago::sendDeathLink() {

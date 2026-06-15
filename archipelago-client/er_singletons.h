@@ -42,6 +42,15 @@ constexpr SingletonInfo kSoloParamRepository = { "SoloParamRepository", 0x02BB26
 constexpr SingletonInfo kCSRegulationManager = { "CSRegulationManager", 0x02BD88D0u, 0x03D86C68u };
 constexpr SingletonInfo kCSEventFlagMan      = { "CSEventFlagMan",      0x02A6CEE8u, 0x03D68458u };
 
+// notify v2 Task B (SPEC-notify-banner.md). slotRva = name-anchored ground truth (the client's FD4
+// resolver in er_gamehook_win.cpp reads the actual accessor at runtime); these confirmed the Hexinton
+// CE-table-derived guesses were ~0x28-0x50 off, so trust these.
+constexpr SingletonInfo kCSItemGetMenuMan    = { "CSItemGetMenuMan",    0x02A9E120u, 0x03D6C3D8u };  // native item-acquired popup (Phase 3 suppress target)
+constexpr SingletonInfo kCSMenuMan           = { "CSMenuMan",           0x02A9BAA8u, 0x03D6B800u };
+// MsgRepository (Phase 2 FMG text) is NOT resolvable via the uniform accessor shape — its name string
+// (RVA 0x029DA758) is referenced from many non-accessor sites, so name-anchoring is ambiguous and the
+// CE-derived slot (~0x03D7D4F8) is UNCONFIRMED. Phase 2 needs a dedicated AOB on its accessor.
+
 // WorldChrMan: class-name string @ RVA 0x02A4A8C0, but its accessor is not the uniform shape in the
 //   immediate window — resolve separately (secondary: player / HP, not on the item-decode path).
 // GameDataMan: no class-name string present -> classic AOB-resolved global, as in the DS3 client.

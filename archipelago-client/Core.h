@@ -1,7 +1,8 @@
 #pragma once
 #define ASIO_STANDALONE
 #define _WEBSOCKETPP_CPP11_INTERNAL_
-#define _CRT_SECURE_NO_WARNINGS
+// _CRT_SECURE_NO_WARNINGS is defined on the command line (vcxproj PreprocessorDefinitions);
+// defining it here as well triggers C4005 macro-redefinition.
 //#define WSWRAP_NO_SSL
 
 #include <modengine/extension.h>
@@ -18,6 +19,8 @@
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include "ArchipelagoInterface.h"
 
@@ -96,6 +99,53 @@ public:
 	// Whether Archipelago is currently connected or not.
 	BOOL connected = false;
 
+	// Dungeon sweep (opt-in via the apworld's dungeon_sweep option; slot_data
+	// "dungeonSweeps"): trigger (mainboss drop) AP location id -> all AP location ids in
+	// that dungeon. When the trigger's flag fires, the remaining members are auto-sent
+	// (see PollLocationFlags). Public: populated by ArchipelagoInterface at connect.
+	std::unordered_map<int64_t, std::vector<int64_t>> dungeonSweeps;
+
+	// Goal locations for ending_condition 2/3 (slot_data "goalLocations"): the goal
+	// completes when ALL of these are checked (server-side truth). Empty for ec 0/1,
+	// which use boss defeat flags instead (CGameHook::isSoulOfCinderDefeated).
+	// Public: populated by ArchipelagoInterface at connect, read by isGoalComplete.
+	std::vector<int64_t> goalLocations;
+
+	// Region-fusion grace bundle (slot_data "regionGraces"; SPEC-region-chain.md / TODO #13):
+	// lock-item NAME -> grace warp-unlock event flags to set when that lock item is received,
+	// lighting up that region's Sites of Grace (fast travel) without a Torrent slog. Present
+	// only when region gating is active (apworld world_logic < 3); empty otherwise. Keyed by
+	// NAME because every region-lock key shares sentinel er_code 99999 and is indistinguishable
+	// by the time it reaches the grant path (GameHook.cpp GiveNextItem) — identity only exists
+	// in the received-items handler. Populated by ArchipelagoInterface at connect.
+	std::unordered_map<std::string, std::vector<uint32_t>> regionGraces;
+
+	// Grace warp flags queued by the received-items handler (the only place a lock item's
+	// identity is known) and drained on an in-game tick by FlushPendingGraceFlags (the only
+	// place the event-flag setter is valid). Cross-thread like receivedItemsQueue — no lock,
+	// matching the existing pattern.
+	std::vector<uint32_t> pendingGraceFlags;
+
+	// Region-open flags (slot_data "regionOpenFlags"; SPEC-region-fog-gates.md): lock-item NAME
+	// -> ONE event flag set when that lock item is received, used by BAKED border fog gates as
+	// their "region is open" condition. Distinct from regionGraces so the gate condition is
+	// unconditional (grace bundle varies with graces_per_region). Present only under region
+	// gating. Drained via the same pendingGraceFlags queue + FlushPendingGraceFlags.
+	std::unordered_map<std::string, uint32_t> regionOpenFlags;
+	// Generalized region-lock detection (slot_data "areaLockFlags"): {areaNameId_lo, hi, open_flag}
+	std::vector<std::vector<int32_t>> areaLockFlags;
+	// Lock item NAME -> map-reveal/open flags; client sets these on receipt (region opens + map reveals).
+	std::unordered_map<std::string, std::vector<int32_t>> lockRevealFlags;
+	// Region-lock unlock NOTIFICATION: lock item NAME -> packed GOODS address granted on receipt so the
+	// native item ticker fires + names the region (locks are otherwise invisible, sentinel 99999).
+	std::unordered_map<std::string, int32_t> lockNotifyItems;
+	std::vector<int32_t> pendingNotifyGrants;  // drained in the in-world grant block
+
+	// Map reveal (slot_data "reveal_all_maps"; beta.3): set by the slot-connected handler when the
+	// apworld wants all region maps revealed without granting map items (map_option=give). The
+	// loaded block in Run() calls GameHook->revealAllMaps until it succeeds, then clears this.
+	BOOL revealAllMapsPending = false;
+
 	static const int RUN_SLEEP = 2000;
 
 private:
@@ -147,6 +197,26 @@ private:
 	// separate JSON file. Remove this once it's no longer necessary to migrate older users onto
 	// the new system (probably as part of 3.1.0).
 	void LoadSaveFile();
+
+	// ER port: writes last_received_index back to [savePath] after each grant. Upstream DS3
+	// persisted this in the native game save; that hook is stubbed in the ER shim, so the JSON
+	// file is the system of record here (LoadSaveFile reads + deletes it at startup).
+	void WriteSaveFile();
+
+	// ER port: AP location id -> guarding in-game event flag (from apconfig.json
+	// "location_flags", emitted by the randomizer bake), polled each tick to detect checks whose
+	// acquisition bypasses the AddItemFunc detour (shops, gifts, offline pickups).
+	std::unordered_map<int64_t, uint32_t> locationFlags;
+	std::unordered_set<int64_t> flagSentLocations;
+	VOID PollLocationFlags();
+
+	// Region-fusion (SPEC-region-chain.md): drain pendingGraceFlags, calling SetEventFlag per
+	// flag so each received region's Sites of Grace become fast-travelable. SetEventFlag is
+	// idempotent and the flag persists in the game save, so re-running on reconnect/replay is
+	// harmless; graceFlagsSetThisSession only suppresses redundant calls / log spam. Flags that
+	// can't be set yet (event-flag holder not initialized) stay queued for a later tick.
+	std::unordered_set<uint32_t> graceFlagsSetThisSession;
+	VOID FlushPendingGraceFlags();
 
 	// Removes (without deleting in case the user still wants it) the old save file. This should
 	// only be called once the file is detected to be broken somehow.

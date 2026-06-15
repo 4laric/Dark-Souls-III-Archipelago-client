@@ -78,4 +78,68 @@ constexpr uint32_t  EventFlag_SetGet_RVA = 0x005D2110;
 constexpr const char* EventFlag_SetGet_AOB =
     "48 89 5C 24 08 48 89 74 24 18 57 48 83 EC 30 48 8B DA 41 0F B6 F8 8B 12 48 8B F1 85 D2 0F 84";
 
+// ---- event flag READ (check detection for acquisitions that bypass AddItemFunc) -------------
+// GetEventFlag(rcx = flag holder, edx = flag id) -> eax nonzero if set. Derived by disassembling
+// EventFlag_SetGet above on this exe: it calls this fn (0x5F9400) with its own rcx to read the
+// current state before writing. Divisor at holder+0x1C, group tree at +0x38 — the classic layout.
+// AOB verified UNIQUE in .text of 2.6.2.0.
+constexpr uint32_t  GetEventFlagFunc_RVA = 0x005F9400;
+constexpr const char* GetEventFlagFunc_AOB =
+    "44 8B 41 1C 44 8B DA 33 D2 41 8B C3 41 F7 F0 4C 8B D1 45 33 C9 44 0F AF C0 45 2B D8 4C 8B 41 38";
+
+// The flag-holder global the game itself passes as rcx (from the Hexinton CE table's EventFlagMan
+// symbol; NOT the same global as the er_singletons CSEventFlagMan slot — they differ by 0x10 on
+// this build). `mov rdi,[rip+disp]`: ptrLoc = match + 7 + i32(match + 3). Resolves to 0x03D68448.
+constexpr uint32_t  EventFlagMan_PtrLoc_RVA = 0x03D68448;
+constexpr const char* EventFlagMan_AOB =
+    "48 8B 3D ?? ?? ?? ?? 48 85 FF ?? ?? 32 C0 E9";
+
+// ---- inventory removal (synthetic-placeholder cleanup, TODO #6 client half) -----------------
+// Goal: pull a synthetic / own-world goods placeholder back OUT of the player's bag. The GIVE
+// path (AddItemFunc, RVA 0x005605B0) is NOT a usable inverse: it is the full CSMapItemMan
+// acquisition pipeline (~335 instrs, 35 calls) and FIRES THE VANILLA "item acquired" popup, so a
+// negative-quantity call would both be unverified AND spam the very popup Task #11 fights. Removal
+// instead edits the player's EquipInventoryData directly: no popup, no notification.
+//
+// Pointer chain (resolved against THIS exe, sha256 3410...3492ddb):
+//   GameDataMan instance : *(module + <global resolved from GameDataMan_AOB>)      (global RVA 0x03D5DF38)
+//   PlayerGameData       : *(gameDataMan + GAMEDATAMAN_PGD_OFF)                     (== 0x08)
+//   EquipInventoryData   : an EMBEDDED sub-object of PlayerGameData. Its PlayerGameData-relative
+//                          offset is reached at runtime via a virtual accessor and is NOT pinned
+//                          statically here; the client AUTO-DISCOVERS it by shape + a target-id
+//                          match (see RemoveInventoryItem in er_gamehook_win.cpp). Once a build is
+//                          confirmed in-game, hard-pin it and drop the scan.
+//
+// EquipInventoryData layout — VERIFIED by disassembling the game's OWN inventory accessor
+// (eldenring.exe 0x0024C4E0..0x0024C61A, the routine Hexinton's "Inventory Editor" hooks):
+//   container +0x1C  u32  slotCount         (# populated slots in the primary array; scan bound)
+//   container +0x50  ptr  primaryItems[]    (normal items; index 0..slotCount-1)   stride 0x18
+//   container +0x40  ptr  overflowItems[]   (index >= slotCount: key/quest spill)  stride 0x18
+//   each entry +0x00 s32  itemId            (game matches on this: `cmp [entry],key`)
+//   each entry +0x0C s32  quantity          (game's get-count returns `mov eax,[entry+0x0C]`)
+// itemId carries the same top-nibble category as a grant (goods = 0x40000000), so a goods
+// placeholder is matched as (goodsId | CATEGORY_GOODS).
+constexpr const char* GameDataMan_AOB =
+    "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 05 48 8B 40 58 C3 C3";  // mov rax,[rip+GameDataMan]; ...
+constexpr int  GameDataMan_DISP_OFF   = 3;     // disp32 offset within the 7-byte (48 8B 05 ..) load
+constexpr int  GAMEDATAMAN_PGD_OFF    = 0x08;  // PlayerGameData = *(GameDataMan + 0x08)
+constexpr int  INV_SLOTCOUNT_OFF      = 0x1C;
+constexpr int  INV_PRIMARY_PTR_OFF    = 0x50;
+constexpr int  INV_OVERFLOW_PTR_OFF   = 0x40;
+constexpr int  INV_ENTRY_STRIDE       = 0x18;
+constexpr int  INV_ENTRY_ID_OFF       = 0x00;
+constexpr int  INV_ENTRY_QTY_OFF      = 0x0C;
+// Bounds for the shape-validation scan (a real bag is dozens..a few hundred slots).
+constexpr int  INV_SCAN_OFF_LO        = 0x100;   // PlayerGameData-relative scan window for the
+constexpr int  INV_SCAN_OFF_HI        = 0x2000;  // embedded EquipInventoryData container
+constexpr int  INV_MAX_SLOTS          = 0x800;   // hard cap on entries walked per array
+
+// FieldArea -> PlayRegionId (region-lock physical enforcement). AOB verified UNIQUE on 2.6.2.0;
+// mov rcx,[rip+disp] -> ptrLoc RVA 0x03D691D8. PlayRegionId = *(s32*)(*(FieldArea_ptrLoc) + 0xE4).
+constexpr const char* FieldArea_AOB =
+    "48 8B 0D ?? ?? ?? ?? 48 ?? ?? ?? 44 0F B6 61 ?? E8";   // mov rcx,[rip+FieldArea]; ...
+constexpr int  FieldArea_DISP_OFF       = 3;       // disp32 within the 7-byte mov rcx,[rip+..]
+constexpr int  FIELDAREA_PLAYREGION_OFF = 0xE4;    // PlayRegionId (s32) off the FieldArea instance
+
 }} // namespace er_ap::hooks
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  

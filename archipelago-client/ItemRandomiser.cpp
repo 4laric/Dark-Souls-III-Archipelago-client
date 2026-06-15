@@ -13,13 +13,15 @@ void Archipelago_SendLocationCheck(int64_t apLocationId) {
 	if (ItemRandomiser) ItemRandomiser->checkedLocationsList.push_front(apLocationId);
 }
 
-// Grant any queued items received from other worlds. ER is goods-only, so every received item is a
-// goods id granted through the ER AddItemFunc path (er_ap::game::GrantGoods bypasses the detour).
+// Grant any queued received items. item.address carries the randomizer's FullID encoding
+// (weapon/armor/ring/goods in the top nibble — identical to the game's gib categories), so it is
+// granted as-is via GrantFullID. With items_handling 0b111 this is the SINGLE granting path:
+// foreign items, own-world echoes, and starting inventory all arrive here.
 VOID CItemRandomiser::grantReceivedItems() {
 	while (!receivedItemsQueue.empty()) {
 		SReceivedItem item = receivedItemsQueue.back();
 		receivedItemsQueue.pop_back();
-		er_ap::game::GrantGoods(static_cast<int32_t>(item.address), static_cast<int32_t>(item.count));
+		er_ap::game::GrantFullID(static_cast<int32_t>(item.address), static_cast<int32_t>(item.count));
 	}
 }
 

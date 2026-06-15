@@ -42,13 +42,19 @@ public:
 	// Set an in-game event flag via the ER event-flag function.
 	VOID setEventFlag(DWORD eventId, BOOL enabled);
 
+	// Map reveal (beta.3 reveal_all_maps): set every region's map-reveal event flag from
+	// kMapUnlockFlags WITHOUT granting map items (map_option=give). DLC maps are skipped unless
+	// includeDlc. Returns true once flags were set (event-flag holder ready); false to retry.
+	bool revealAllMaps(bool includeDlc);
+
 	// DS3 gesture; no ER equivalent (no-op).
 	VOID grantPathOfTheDragon();
 
 	// Auto-equip out of scope for the MVP (no-op).
 	VOID equipItem(EquipSlot equipSlot, DWORD inventorySlot);
 
-	// TODO(ER inventory removal): remove an item from the player's inventory. No-op for now.
+	// Remove an item from the player's bag (goods-placeholder cleanup). Walks EquipInventoryData;
+	// page-safe and idempotent -> harmless no-op if not in-world or the item isn't held.
 	VOID removeFromInventory(int32_t itemCategory, int32_t itemId, uint64_t quantity = 1);
 
 	// Debug command (/itemGib): grant a goods item by base id.
@@ -63,6 +69,9 @@ public:
 	DWORD dIsNoEquipLoadRequirements = 0;
 	DWORD dIsDeathLink = 0;
 	DWORD dEnableDLC = 0;
+	// ER apworld ending_condition: 0 = DLC final boss (PCR) if DLC else Elden Beast,
+	// 1 = Elden Beast, 2 = all remembrances, 3 = all bosses (2/3 not auto-detectable).
+	int dEndingCondition = 1;
 	HANDLE hHeap = nullptr;
 
 	BOOL deathLinkData = false;

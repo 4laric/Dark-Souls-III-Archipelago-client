@@ -7,6 +7,7 @@
 #include <map>
 #include <deque>
 #include <list>
+#include <string>
 
 // A struct representing an item received from another world, queued for granting in-game.
 struct SReceivedItem {
@@ -15,6 +16,13 @@ struct SReceivedItem {
 
 	// The number of copies of this item that were received.
 	DWORD count;
+
+	// Notify v2 (SPEC-notify-item-source.md): the SOURCE shown at grant time. Resolved in the
+	// receive handler (ArchipelagoInterface) and carried here because receive and grant are
+	// time-decoupled (pacing + boss-defer) — the notification must travel with the item.
+	std::string sender;     // get_player_alias(item.player); "Server" for starting inventory, "" if unresolved
+	std::string itemName;   // get_item_name(...) — AP canonical name, used verbatim (already encodes qty)
+	bool        ownItem;    // item.player == own slot (self-found): notification drops the "from"
 };
 
 // Goods-only ER item handler. Pickup detection, synthetic decode, local grant, and location-check
@@ -35,8 +43,11 @@ public:
 	VOID sendMissedItems();
 
 	DWORD dIsAutoEquip = 0;
-	std::map<DWORD, DWORD> pApItemsToItemIds = { };
-	std::map<DWORD, DWORD> pItemCounts = { };
+	// Keyed by AP item id (int64): AP ids can exceed 32 bits (location ids already do), and the old
+	// DWORD key truncated -- std::stol even throws out_of_range past 2^31. Values are 32-bit ER item
+	// ids / counts.
+	std::map<int64_t, DWORD> pApItemsToItemIds = { };
+	std::map<int64_t, DWORD> pItemCounts = { };
 	std::deque<SReceivedItem> receivedItemsQueue = { };
 	std::list<int64_t> checkedLocationsList = { };
 };
