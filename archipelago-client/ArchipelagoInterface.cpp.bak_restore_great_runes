@@ -390,35 +390,6 @@ BOOL CArchipelago::Initialise(std::string URI) {
 					itemname, keyIt->second.size());
 			}
 
-			// Great-rune restore-on-receipt: under num_regions_rune_source=pool the great runes are
-			// INJECTED into the pool (patch_apworld_num_regions_pool_runes.py) and arrive as the raw,
-			// UNRESTORED goods row, which the game won't let you equip until you activate it at the
-			// matching Divine Tower (which the seal may have removed). ER ships a second 'restored'
-			// EquipParamGoods row per rune (191-196; Paramdex EquipParamGoods 33-38, named "(Restored)"
-			// in the apworld GOODS.txt). Granting that restored row = the same state the tower confers,
-			// so the player can equip + Rune-Arc it immediately. We push it through the normal grant
-			// queue as a GOODS-packed FullID (id | 0x40000000) -- identical mechanism to the Lord's Rune
-			// overflow grant a few lines below. ADDITIVE: no `continue`, the raw rune still grants too.
-			// The Great Rune of the Unborn (Rennala, 10080) has no tower / no restored row and is usable
-			// as received, so it is intentionally absent.
-			static const std::unordered_map<std::string, uint32_t> kGreatRuneRestoreGoods = {
-				{ "Godrick's Great Rune",  191u },  // unrestored 8148 -> restored 191
-				{ "Radahn's Great Rune",   192u },  // unrestored 8149 -> restored 192
-				{ "Morgott's Great Rune",  193u },  // unrestored 8150 -> restored 193
-				{ "Rykard's Great Rune",   194u },  // unrestored 8151 -> restored 194
-				{ "Mohg's Great Rune",     195u },  // unrestored 8152 -> restored 195
-				{ "Malenia's Great Rune",  196u },  // unrestored 8153 -> restored 196
-			};
-			auto runeIt = kGreatRuneRestoreGoods.find(itemname);
-			if (runeIt != kGreatRuneRestoreGoods.end()) {
-				ItemRandomiser->receivedItemsQueue.push_front({
-					(DWORD)(runeIt->second | 0x40000000), 1, sender, itemname,
-					item.player == ap->get_player_number()
-				});
-				spdlog::info("Great rune '{}' received: also granting restored goods {} (usable now)",
-					itemname, runeIt->second);
-			}
-
 			// Progressive stone bells: resolve the tier by receipt order. The Kth copy sets its Twin
 			// Maiden shop flags (idempotent) AND grants the cosmetic bell goods via the normal queue
 			// (which respects last_received_index -> no dup on reconnect). Counter resets on the queue

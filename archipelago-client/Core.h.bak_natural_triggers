@@ -139,21 +139,6 @@ public:
 	// unconditional (grace bundle varies with graces_per_region). Present only under region
 	// gating. Drained via the same pendingGraceFlags queue + FlushPendingGraceFlags.
 	std::unordered_map<std::string, uint32_t> regionOpenFlags;
-
-	// Natural-key triggers (slot_data "naturalKeyTriggers"; SPEC-natural-locks.md): bloom a
-	// region's apparatus when a DISJUNCTION of vanilla triggers is satisfied, instead of when
-	// a synthetic lock ITEM arrives. LockName -> list of clauses; a clause is satisfied when
-	// ALL its items were received (by NAME, via receivedItemNames) AND ALL its flags are set
-	// (GetEventFlagState). ANY satisfied clause fires the bloom (push regionGraces/
-	// regionOpenFlags/lockRevealFlags + lockNotifyItems for that LockName). The open flag is
-	// the save-persisted once-latch. Evaluated in CCore::EvaluateNaturalKeyTriggers on a
-	// settled in-world tick. Absent/empty on seeds that don't use natural keys.
-	struct NKClause { std::vector<std::string> items; std::vector<uint32_t> flags; };
-	std::unordered_map<std::string, std::vector<NKClause>> naturalKeyTriggers;
-	// Item NAMES received this session (maintained in the received-items handler). Rebuilt
-	// from the items_received replay on reconnect (items_handling 0b111 re-delivers all),
-	// so no separate persistence is needed; the region open flag is the durable latch.
-	std::unordered_set<std::string> receivedItemNames;
 	// Generalized region-lock detection (slot_data "areaLockFlags"): {areaNameId_lo, hi, open_flag}
 	std::vector<std::vector<int32_t>> areaLockFlags;
 	// DLC-only auto-entry (slot_data "dlcEntryWarpFlag" / "dlcStartAreaId"): when the poll sees the
@@ -161,13 +146,6 @@ public:
 	// common.emevd WarpPlayer -> Gravesite Plain. 0/absent on non-dlc_only seeds. See patch_baker_dlcentry.py.
 	int32_t dlcEntryWarpFlag = 0;
 	int32_t dlcStartAreaId = 0;
-	// Random starting region (slot_data randomStartWarpFlag/AreaId/DoneFlag): when the poll sees
-	// the player in randomStartAreaId (Chapel) it sets randomStartWarpFlag (76969) ONCE -> baked
-	// common.emevd WarpPlayer -> the rolled start region. randomStartDoneFlag (76968) persists so it
-	// fires once per save. 0/absent on non-random-start seeds. See patch_baker_random_start_warp_v2_datadriven.py.
-	int32_t randomStartWarpFlag = 0;
-	int32_t randomStartAreaId = 0;
-	int32_t randomStartDoneFlag = 0;
 	// Lock item NAME -> map-reveal/open flags; client sets these on receipt (region opens + map reveals).
 	std::unordered_map<std::string, std::vector<int32_t>> lockRevealFlags;
 	// Region-lock unlock NOTIFICATION: lock item NAME -> packed GOODS address granted on receipt so the
@@ -277,13 +255,6 @@ private:
 	// can't be set yet (event-flag holder not initialized) stay queued for a later tick.
 	std::unordered_set<uint32_t> graceFlagsSetThisSession;
 	VOID FlushPendingGraceFlags();
-
-	// Natural-key triggers (SPEC-natural-locks.md): on a settled in-world tick, evaluate each
-	// naturalKeyTriggers entry; when ANY clause is satisfied (all items received AND all flags
-	// set) and the region's open flag is not yet set, bloom that region (push graces/open/reveal
-	// flags + notify item). The open flag is the once-latch. Flag reads only happen here, never
-	// mid-init. Called right after FlushPendingGraceFlags in the settled poll block.
-	VOID EvaluateNaturalKeyTriggers();
 
 	// Removes (without deleting in case the user still wants it) the old save file. This should
 	// only be called once the file is detected to be broken somehow.

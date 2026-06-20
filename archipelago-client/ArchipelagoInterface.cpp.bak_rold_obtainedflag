@@ -144,30 +144,6 @@ BOOL CArchipelago::Initialise(std::string URI) {
 					Core->regionOpenFlags.size());
 			}
 		}
-
-		// Natural-key triggers (SPEC-natural-locks.md): tolerant parse -- older seeds omit the key.
-		// LockName -> { "anyOf": [ {"items":[...],"flags":[...]}, ... ] }. A clause is satisfied
-		// when all items were received AND all flags are set; ANY clause blooms the region. Reuses
-		// the existing regionGraces/regionOpenFlags/lockRevealFlags/lockNotifyItems tables for the
-		// bloom effect (see CCore::EvaluateNaturalKeyTriggers).
-		Core->naturalKeyTriggers.clear();
-		if (data.contains("naturalKeyTriggers")) {
-			for (auto& kv : data.at("naturalKeyTriggers").items()) {
-				std::vector<CCore::NKClause> clauses;
-				if (kv.value().contains("anyOf")) {
-					for (auto& c : kv.value().at("anyOf")) {
-						CCore::NKClause cl;
-						if (c.contains("items")) for (auto& it : c.at("items")) cl.items.push_back(it.get<std::string>());
-						if (c.contains("flags")) for (auto& fl : c.at("flags")) cl.flags.push_back(fl.get<uint32_t>());
-						clauses.push_back(std::move(cl));
-					}
-				}
-				Core->naturalKeyTriggers[kv.key()] = std::move(clauses);
-			}
-			if (!Core->naturalKeyTriggers.empty())
-				spdlog::info("Natural-key triggers: {} region(s) bloom on vanilla trigger disjunction",
-					Core->naturalKeyTriggers.size());
-		}
 		Core->areaLockFlags.clear();
 		if (data.contains("areaLockFlags")) {
 			data.at("areaLockFlags").get_to(Core->areaLockFlags);
@@ -179,12 +155,6 @@ BOOL CArchipelago::Initialise(std::string URI) {
 		Core->dlcStartAreaId   = data.value("dlcStartAreaId", 0);
 		if (Core->dlcEntryWarpFlag)
 			spdlog::info("DLC auto-entry: flag {} fires when player enters area {}", Core->dlcEntryWarpFlag, Core->dlcStartAreaId);
-		// Random starting region: same latch pattern as DLC auto-entry, for the rolled start region.
-		Core->randomStartWarpFlag = data.value("randomStartWarpFlag", 0);
-		Core->randomStartAreaId   = data.value("randomStartAreaId", 0);
-		Core->randomStartDoneFlag = data.value("randomStartDoneFlag", 0);
-		if (Core->randomStartWarpFlag)
-			spdlog::info("Random start: flag {} fires when player enters area {}", Core->randomStartWarpFlag, Core->randomStartAreaId);
 		Core->lockRevealFlags.clear();
 		if (data.contains("lockRevealFlags")) {
 			data.at("lockRevealFlags").get_to(Core->lockRevealFlags);
@@ -309,10 +279,6 @@ BOOL CArchipelago::Initialise(std::string URI) {
 
 			spdlog::info("#{}: {} from {} - {}", item.index, itemname, sender, location);
 
-			// Maintain the received-NAME set for natural-key trigger evaluation. Rebuilt from the
-			// items_received replay on reconnect (items_handling 0b111), so it needs no persistence.
-			Core->receivedItemNames.insert(itemname);
-
 			// Region-fusion: if this item is a region lock key, queue its grace warp-unlock flags
 			// for CCore::FlushPendingGraceFlags to set on the next in-game tick. Done HERE, not in
 			// the grant path, because every region-lock key shares sentinel er_code 99999 and is
@@ -370,53 +336,6 @@ BOOL CArchipelago::Initialise(std::string URI) {
 					Core->pendingGraceFlags.push_back(flag);
 				spdlog::info("Companion item '{}' received: queued {} acquisition flag(s)",
 					itemname, compIt->second.size());
-			}
-
-			// Key-item acquisition flags: vanilla KEY ITEMS whose progression gate reads an
-			// "obtained" EVENT FLAG, not inventory. A raw client goods-grant leaves the gate
-			// sealed, so set the flag here. Same NAME->flags shape + same pendingGraceFlags drain
-			// (FlushPendingGraceFlags -> SetEventFlag, idempotent + save-persisted) as the
-			// companion map above. Kept separate from kCompanionAcquireFlags so each map's intent
-			// stays clear. Add an entry for any future flag-gated key item.
-			static const std::unordered_map<std::string, std::vector<uint32_t>> kKeyItemAcquireFlags = {
-				{ "Rold Medallion",   { 400001u } },  // Grand Lift of Rold gates on 400001 (was sealed)
-				{ "Drawing-Room Key", { 400072u } },  // Volcano Manor drawing-room transition
-			};
-			auto keyIt = kKeyItemAcquireFlags.find(itemname);
-			if (keyIt != kKeyItemAcquireFlags.end()) {
-				for (uint32_t flag : keyIt->second)
-					Core->pendingGraceFlags.push_back(flag);
-				spdlog::info("Key item '{}' received: queued {} obtained-flag(s)",
-					itemname, keyIt->second.size());
-			}
-
-			// Great-rune restore-on-receipt: under num_regions_rune_source=pool the great runes are
-			// INJECTED into the pool (patch_apworld_num_regions_pool_runes.py) and arrive as the raw,
-			// UNRESTORED goods row, which the game won't let you equip until you activate it at the
-			// matching Divine Tower (which the seal may have removed). ER ships a second 'restored'
-			// EquipParamGoods row per rune (191-196; Paramdex EquipParamGoods 33-38, named "(Restored)"
-			// in the apworld GOODS.txt). Granting that restored row = the same state the tower confers,
-			// so the player can equip + Rune-Arc it immediately. We push it through the normal grant
-			// queue as a GOODS-packed FullID (id | 0x40000000) -- identical mechanism to the Lord's Rune
-			// overflow grant a few lines below. ADDITIVE: no `continue`, the raw rune still grants too.
-			// The Great Rune of the Unborn (Rennala, 10080) has no tower / no restored row and is usable
-			// as received, so it is intentionally absent.
-			static const std::unordered_map<std::string, uint32_t> kGreatRuneRestoreGoods = {
-				{ "Godrick's Great Rune",  191u },  // unrestored 8148 -> restored 191
-				{ "Radahn's Great Rune",   192u },  // unrestored 8149 -> restored 192
-				{ "Morgott's Great Rune",  193u },  // unrestored 8150 -> restored 193
-				{ "Rykard's Great Rune",   194u },  // unrestored 8151 -> restored 194
-				{ "Mohg's Great Rune",     195u },  // unrestored 8152 -> restored 195
-				{ "Malenia's Great Rune",  196u },  // unrestored 8153 -> restored 196
-			};
-			auto runeIt = kGreatRuneRestoreGoods.find(itemname);
-			if (runeIt != kGreatRuneRestoreGoods.end()) {
-				ItemRandomiser->receivedItemsQueue.push_front({
-					(DWORD)(runeIt->second | 0x40000000), 1, sender, itemname,
-					item.player == ap->get_player_number()
-				});
-				spdlog::info("Great rune '{}' received: also granting restored goods {} (usable now)",
-					itemname, runeIt->second);
 			}
 
 			// Progressive stone bells: resolve the tier by receipt order. The Kth copy sets its Twin

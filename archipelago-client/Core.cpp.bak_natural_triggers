@@ -555,10 +555,6 @@ VOID CCore::Run() {
 			// pending queue + graceFlagsSetThisSession retry it harmlessly until then. See SPEC-region-chain.md.
 			FlushPendingGraceFlags();
 
-			// Natural-key triggers: bloom regions whose vanilla trigger disjunction is now satisfied.
-			// MUST be inside this settled (InventoryInstance()!=0) block -- it reads event flags.
-			EvaluateNaturalKeyTriggers();
-
 			PollLocationFlags();
 
 			// Region-lock enforcement poll (play-region/fog-gate pivot). The open world doesn't fire
@@ -589,16 +585,7 @@ VOID CCore::Run() {
 				// Set KICK_FLAG (76970) ONCE per entry (latch); re-arm on leaving. Avoids a death loop when
 				// respawn lands inside a locked region. Baked common.emevd reactor warps the player out.
 				if (!locked) kickLatched = false;
-				// Start-window guard (Alaric 2026-06-20): on a random-start seed the player transiently
-				// spawns in (locked) Limgrave before the baked warp pulls them to the rolled hub; the
-				// kill-keep-runes enforcement would kill them on that spawn. Don't arm the KICK until the
-				// random-start warp has fired (randomStartDoneFlag set). Non-random seeds: done flag 0 =>
-				// guard always true => behaviour unchanged.
-				else if (!kickLatched
-					&& (randomStartDoneFlag == 0
-						|| er_ap::game::GetEventFlagState((uint32_t)randomStartDoneFlag))) {
-					kickLatched = true; er_ap::game::SetEventFlag(76970, true);
-				}
+				else if (!kickLatched) { kickLatched = true; er_ap::game::SetEventFlag(76970, true); }
 
 				// DLC-only auto-entry (Alaric 2026-06-16): on the intro Chapel of Anticipation, set the baked
 				// entry flag ONCE -> common.emevd WarpPlayer streams the player into Gravesite Plain (m61).
@@ -610,18 +597,6 @@ VOID CCore::Run() {
 					dlcEntryLatched = true;
 					er_ap::game::SetEventFlag((uint32_t)dlcEntryWarpFlag, true);
 					spdlog::info("DLC auto-entry: in start area {} -> set flag {} -> warp to Gravesite Plain", pr, dlcEntryWarpFlag);
-				}
-
-				// Random starting region (mirrors DLC auto-entry): on the intro Chapel, set the baked warp
-				// flag ONCE -> common.emevd WarpPlayer -> the rolled start region. Persistent randomStartDoneFlag
-				// guards the optional late Chapel revisit / reconnect.
-				static bool randomStartLatched = false;
-				if (randomStartWarpFlag && randomStartAreaId && randomStartDoneFlag && pr == randomStartAreaId
-					&& !er_ap::game::GetEventFlagState((uint32_t)randomStartDoneFlag) && !randomStartLatched) {
-					randomStartLatched = true;
-					er_ap::game::SetEventFlag((uint32_t)randomStartDoneFlag, true);
-					er_ap::game::SetEventFlag((uint32_t)randomStartWarpFlag, true);
-					spdlog::info("Random start: in area {} -> set flag {} -> warp to start region", pr, randomStartWarpFlag);
 				}
 			}
 
@@ -1006,55 +981,6 @@ VOID CCore::FlushPendingGraceFlags() {
 	pendingGraceFlags.swap(retry);
 	if (setCount > 0) {
 		spdlog::info("Region fusion: set {} grace warp flag(s) ({} pending)", setCount, pendingGraceFlags.size());
-	}
-}
-
-// Natural-key triggers (SPEC-natural-locks.md): a region blooms when a DISJUNCTION of vanilla
-// triggers is satisfied, instead of when a synthetic lock item arrives. For each lock, a clause
-// is satisfied when ALL its items were received (by NAME) AND ALL its flags are set; ANY clause
-// fires the bloom. The region open flag (save-persisted via SetEventFlag in FlushPendingGraceFlags)
-// doubles as the once-latch -- once set, the guard below skips the lock forever, so re-blooming on
-// reconnect/replay is a no-op. Called ONLY from the settled InventoryInstance()!=0 poll block, so
-// GetEventFlagState is always valid (never mid-init). The bloom pushes flags onto pendingGraceFlags
-// (flushed next tick) + lockNotifyItems onto pendingNotifyGrants, exactly like the lock-item path.
-VOID CCore::EvaluateNaturalKeyTriggers() {
-	if (naturalKeyTriggers.empty()) return;
-	for (const auto& nk : naturalKeyTriggers) {
-		const std::string& name = nk.first;
-		const std::vector<NKClause>& clauses = nk.second;
-		// Guard: skip if this region has no open flag, or its open flag is already set (latch).
-		auto openIt = regionOpenFlags.find(name);
-		if (openIt == regionOpenFlags.end()) continue;
-		if (er_ap::game::GetEventFlagState(openIt->second)) continue;  // already bloomed (latch)
-		// Any clause satisfied? (all items received AND all flags set)
-		bool fired = false;
-		for (const auto& cl : clauses) {
-			bool ok = true;
-			for (const std::string& nm : cl.items) {
-				if (!receivedItemNames.count(nm)) { ok = false; break; }
-			}
-			if (ok) {
-				for (uint32_t fl : cl.flags) {
-					if (!er_ap::game::GetEventFlagState(fl)) { ok = false; break; }
-				}
-			}
-			if (ok) { fired = true; break; }
-		}
-		if (!fired) continue;
-		// BLOOM: queue this region's grace + open + reveal flags onto pendingGraceFlags (flushed
-		// next tick by FlushPendingGraceFlags -> SetEventFlag), and its notify item if present.
-		int queued = 0;
-		auto graceIt = regionGraces.find(name);
-		if (graceIt != regionGraces.end())
-			for (uint32_t fl : graceIt->second) { pendingGraceFlags.push_back(fl); ++queued; }
-		pendingGraceFlags.push_back(openIt->second); ++queued;  // open flag = latch + fog gate cond
-		auto revealIt = lockRevealFlags.find(name);
-		if (revealIt != lockRevealFlags.end())
-			for (int32_t fl : revealIt->second) { pendingGraceFlags.push_back((uint32_t)fl); ++queued; }
-		auto notifyIt = lockNotifyItems.find(name);
-		if (notifyIt != lockNotifyItems.end())
-			pendingNotifyGrants.push_back(notifyIt->second);
-		spdlog::info("Natural-key '{}' satisfied: bloomed region ({} flag(s) queued)", name, queued);
 	}
 }
 

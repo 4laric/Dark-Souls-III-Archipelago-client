@@ -104,7 +104,7 @@
       <PreprocessorDefinitions>WIN32;_WINDOWS;_USRDLL;_WIN32_WINNT=0x0600;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>subprojects;dep;subprojects\wswrap\include;subprojects\apclientpp;subprojects\minhook\include;subprojects\mem\include;subprojects\fd4_singleton;subprojects\ModEngine2\include;subprojects\MINT;subprojects\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>

@@ -145,8 +145,6 @@ uintptr_t  g_getEventFlagFn = 0;         // GetEventFlag(rcx=holder, edx=flagId)
 uintptr_t  g_setEventFlagFn = 0;         // SetEventFlag(rcx=holder, rdx=&flagId, r8b=on)
 uintptr_t  g_eventFlagPtrLoc= 0;         // *(g_eventFlagPtrLoc) == flag-holder instance
 uintptr_t  g_gameDataManPtrLoc=0;       // *(g_gameDataManPtrLoc) == CSGameDataMan instance (player bag)
-uintptr_t  g_luaWarpFn      = 0;         // LuaWarp(rcx=[mgr+0x18], rdx=[mgr+0x08], r8d=warpId-1000)
-uintptr_t  g_csLuaEventMgrPtrLoc = 0;    // *(loc) == CSLuaEventManager instance (Hexinton CT warp)
 uintptr_t  g_fieldAreaPtrLoc = 0;       // *(g_fieldAreaPtrLoc) == FieldArea instance; PlayRegionId @ +0xE4
 
 // The synthetic placeholder's id is read from the descriptor the game passes to AddItemFunc.
@@ -170,14 +168,7 @@ uint64_t Detour(void* inventory, void* entry, void* buffer, void* zero) {
         Archipelago_SendLocationCheck(s.apLocationId);
         return 0;                                                       // suppress: never add the placeholder
     }
-    // auto_upgrade: bump an inbound REAL weapon (world loot, chest, NPC gift, craft) to the
-    // player's current highest reinforce level on its own smithing track before the game adds it.
-    if (entry) {
-        int32_t upId = 0;
-        if (AutoUpgradeWeaponId(rawId, &upId))
-            std::memcpy(reinterpret_cast<uint8_t*>(entry) + ENTRY_ID_OFF, &upId, 4);
-    }
-    return g_addItemOrig(inventory, entry, buffer, zero);               // real item (maybe upgraded)
+    return g_addItemOrig(inventory, entry, buffer, zero);               // real item: untouched
 }
 
 } // anonymous namespace
@@ -197,8 +188,6 @@ uintptr_t InventoryInstance() {
 void GrantItem(int32_t idWithCategory, int32_t quantity, int32_t gem) {
     uintptr_t inv = InventoryInstance();
     if (!inv || !g_addItemOrig) return;
-    // auto_upgrade: AP-granted weapons bypass the Detour, so upgrade them here too.
-    { int32_t upId = 0; if (AutoUpgradeWeaponId(idWithCategory, &upId)) idWithCategory = upId; }
     // descriptor template (from the CE table): count@+0x20=1, id@+0x24, qty@+0x28, gem@+0x30=-1, trailing -1s.
     alignas(8) uint8_t buf[0x50];
     std::memset(buf, 0, sizeof buf);
@@ -223,22 +212,6 @@ bool SetEventFlag(uint32_t eventFlagId, bool on) {
     if (holder < 0x10000) return false;                                 // not initialized yet
     using SetFlagFn = void(*)(void* holder, uint32_t* flagId, uint8_t on);
     reinterpret_cast<SetFlagFn>(g_setEventFlagFn)(reinterpret_cast<void*>(holder), &eventFlagId, on ? 1 : 0);
-    return true;
-}
-
-// Warp the player to a grace/warp point -- port of the Hexinton CT 'Fast Travel and Warp'.
-// warpId = CT 'Choose Grace' dropdown id (e.g. 68000 = Gravesite Plain). The game routine is
-// LuaWarp(rcx=[CSLuaEventManager+0x18], rdx=[CSLuaEventManager+0x08], r8d=warpId-1000).
-bool Warp(int32_t warpId) {
-    if (!g_luaWarpFn || !g_csLuaEventMgrPtrLoc) return false;
-    uintptr_t mgr;
-    std::memcpy(&mgr, reinterpret_cast<const void*>(g_csLuaEventMgrPtrLoc), sizeof mgr);
-    if (mgr < 0x10000) return false;                                    // not initialized yet
-    uint64_t a18, a08;
-    std::memcpy(&a18, reinterpret_cast<const void*>(mgr + 0x18), sizeof a18);
-    std::memcpy(&a08, reinterpret_cast<const void*>(mgr + 0x08), sizeof a08);
-    using LuaWarpFn = void(*)(uint64_t, uint64_t, uint32_t);            // x64: rcx, rdx, r8d
-    reinterpret_cast<LuaWarpFn>(g_luaWarpFn)(a18, a08, static_cast<uint32_t>(warpId - 1000));
     return true;
 }
 
@@ -277,15 +250,6 @@ bool Init() {
     uintptr_t faMatch = FindPattern(hooks::FieldArea_AOB);
     g_fieldAreaPtrLoc = faMatch ? RipTarget(faMatch, hooks::FieldArea_DISP_OFF, 7) : 0;
     spdlog::info("er::Init FieldArea: match={:#x} ptrLoc={:#x}", faMatch, g_fieldAreaPtrLoc);
-
-    // Warp (Hexinton CT 'Fast Travel and Warp'): LuaWarp fn (call target = match+2) + the
-    // CSLuaEventManager singleton ptr-loc. Non-fatal: /warp degrades to a no-op if either misses.
-    uintptr_t lwMatch  = FindPattern("C3 ?? ?? ?? ?? ?? ?? 57 48 83 EC ?? 48 8B FA 44");
-    g_luaWarpFn = lwMatch ? lwMatch + 2 : 0;
-    uintptr_t lemMatch = FindPattern("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 41 BE 01 00 00 00 44 89 75");
-    g_csLuaEventMgrPtrLoc = lemMatch ? RipTarget(lemMatch, /*dispOff*/3, /*instrLen*/7) : 0;
-    spdlog::info("er::Init Warp: luaWarpMatch={:#x} luaWarpFn={:#x} csLuaEventMgr={:#x}",
-                 lwMatch, g_luaWarpFn, g_csLuaEventMgrPtrLoc);
 
     // Notify v2 Task B Phase 0 (SPEC-notify-banner.md): resolve the managers Phase 2/3 will need and
     // LOG ONLY (no calls, no writes) to confirm the name-anchored FD4 slots on the live build.
@@ -443,253 +407,6 @@ bool RemoveInventoryItem(int32_t fullItemId, int32_t quantity) {
                      static_cast<uint32_t>(fullItemId), validated);
     return acted;
 }
-
-// ===== auto_upgrade (slot_data auto_upgrade) ================================================
-// Bump an acquired weapon to the player's current highest reinforce level on its own smithing
-// track. ER bakes the level into the item id (id = base + level, base % 100 == 0) but keeps only
-// ONE EquipParamWeapon row per weapon; the cap+track come from reinforceTypeId via
-// ReinforceParamWeapon (cap = #consecutive rows from rt; >10 => normal, 1..10 => somber). The
-// reinforceTypeId byte offset is SELF-CALIBRATED at runtime; on failure the feature stays idle.
-namespace {
-    int g_autoUpgrade        = 0;
-    const uint8_t* g_eqwBlob = nullptr;   // EquipParamWeapon blob (cached)
-    const uint8_t* g_rpwBlob = nullptr;   // ReinforceParamWeapon blob (cached)
-    int  g_rtOffset          = -1;        // calibrated byte offset of reinforceTypeId in an EQW row
-    bool g_calibFailed       = false;
-    int  g_normalTarget      = 0;         // live highest +N among normal-track weapons (0..25)
-    int  g_somberTarget      = 0;         // live highest +N among somber-track weapons (0..10)
-
-    // perf caches (auto-upgrade was re-walking inventory + rescanning params on every grant):
-    int       g_invContainerOff   = -1;   // cached PlayerGameData-relative EquipInventoryData offset
-    uint64_t  g_lastRefreshTick    = 0;   // GetTickCount64() of the last full inventory walk
-    static const uint64_t kRefreshThrottleMs = 1500;  // coalesce reconnect-replay bursts
-    int16_t   g_capRt[48]  = {0};         // small reinforceTypeId -> cap cache (keys)
-    int8_t    g_capVal[48] = {0};         // small reinforceTypeId -> cap cache (values)
-    int       g_capCount   = 0;
-
-    // base-game anchors (always present in the param) for offset self-calibration:
-    const int32_t kNormalAnchors[4] = { 2000000, 1000000, 9000000, 11010000 };  // reinforceTypeId 0
-    const int32_t kSomberAnchors[4] = { 9060000, 9040000, 3090000, 3140000 };   // reinforceTypeId 2200
-    const int16_t kSomberRT = 2200;
-
-    const uint8_t* SafeBlobFromRepoIndex(uintptr_t repo, int index) {
-        using namespace hooks;
-        uint64_t hdr = 0, mid = 0, blob = 0;
-        if (!SafeRead(repo + (uintptr_t)index * PARAM_ENTRY_STRIDE + PARAM_ENTRY_OFF, hdr) || !hdr) return nullptr;
-        if (!SafeRead((uintptr_t)hdr + PARAM_HEADER_DEREF, mid) || !mid) return nullptr;
-        if (!SafeRead((uintptr_t)mid + PARAM_HEADER_DEREF, blob) || !blob) return nullptr;
-        return reinterpret_cast<const uint8_t*>((uintptr_t)blob);
-    }
-    inline bool RowS16(const uint8_t* row, int off, int16_t& v) {
-        return SafeRead(reinterpret_cast<uintptr_t>(row) + off, v);
-    }
-
-    // Resolve both weapon params by content fingerprint (the repo is NOT BND-ordered).
-    bool ResolveWeaponParams() {
-        if (g_eqwBlob && g_rpwBlob) return true;
-        uintptr_t repo = ParamRepoInstance();
-        if (repo < 0x10000) return false;
-        for (int i = 0; i < 400 && !(g_eqwBlob && g_rpwBlob); ++i) {
-            const uint8_t* b = SafeBlobFromRepoIndex(repo, i);
-            if (!b) continue;
-            if (!g_eqwBlob && RowInBlob(b, 2000000) && RowInBlob(b, 1000000))
-                g_eqwBlob = b;                                                  // EquipParamWeapon
-            if (!g_rpwBlob && RowInBlob(b, 0) && RowInBlob(b, 25) && RowInBlob(b, 2200)
-                           && RowInBlob(b, 2210) && RowInBlob(b, 9010))
-                g_rpwBlob = b;                                                  // ReinforceParamWeapon
-        }
-        return g_eqwBlob && g_rpwBlob;
-    }
-
-    // Find the s16 offset where all normal anchors read 0 and all somber anchors read 2200.
-    bool CalibrateOffset() {
-        if (g_rtOffset >= 0) return true;
-        if (g_calibFailed)   return false;
-        const uint8_t* na[4]; const uint8_t* sa[4];
-        for (int k = 0; k < 4; ++k) { na[k] = RowInBlob(g_eqwBlob, kNormalAnchors[k]);
-                                      sa[k] = RowInBlob(g_eqwBlob, kSomberAnchors[k]); }
-        for (int o = 0; o <= 1024; ++o) {
-            bool ok = true;
-            for (int k = 0; k < 4 && ok; ++k) { int16_t v; if (!na[k] || !RowS16(na[k], o, v) || v != 0)         ok = false; }
-            for (int k = 0; k < 4 && ok; ++k) { int16_t v; if (!sa[k] || !RowS16(sa[k], o, v) || v != kSomberRT) ok = false; }
-            if (ok) { g_rtOffset = o;
-                      spdlog::info("auto_upgrade: reinforceTypeId offset calibrated to +{:#x}", o); return true; }
-        }
-        g_calibFailed = true;
-        spdlog::warn("auto_upgrade: reinforceTypeId calibration FAILED; auto-upgrade idle this session");
-        return false;
-    }
-
-    bool Ready() {
-        if (!g_autoUpgrade) return false;
-        if (!ResolveWeaponParams()) { spdlog::warn("auto_upgrade: weapon params not found; idle this session"); return false; }
-        return CalibrateOffset();
-    }
-
-    // cap = max k in [0,25] s.t. ReinforceParamWeapon row (rt + k) exists.
-    int CapForRT(int16_t rt) {
-        for (int j = 0; j < g_capCount; ++j) if (g_capRt[j] == rt) return g_capVal[j];   // cache hit
-        int k = 0; while (k <= 25 && RowInBlob(g_rpwBlob, (int32_t)rt + k)) ++k;
-        int cap = k - 1;
-        if (g_capCount < (int)(sizeof g_capRt / sizeof g_capRt[0])) {
-            g_capRt[g_capCount] = rt; g_capVal[g_capCount] = (int8_t)cap; ++g_capCount;
-        }
-        return cap;
-    }
-
-    struct WInfo { int32_t base; int level; int cap; bool somber; };
-    // Decode an item id as an upgradeable weapon (acquirable base-weapon id range only).
-    bool WeaponInfo(int32_t itemId, WInfo& out) {
-        if ((static_cast<uint32_t>(itemId) & er_ap::CATEGORY_MASK) != er_ap::CATEGORY_WEAPON) return false;
-        if (itemId < 1000000 || itemId >= 90000000) return false;   // skip system/NPC + non-weapons
-        out.base  = itemId - (itemId % 100);
-        out.level = itemId % 100;
-        const uint8_t* row = RowInBlob(g_eqwBlob, out.base);
-        if (!row) return false;
-        int16_t rt; if (!RowS16(row, g_rtOffset, rt)) return false;
-        out.cap = CapForRT(rt);
-        if (out.cap <= 0) return false;            // not upgradeable
-        out.somber = (out.cap <= 10);
-        return true;
-    }
-}
-
-// DIAGNOSTIC kill switch (2026-06-16): when 1, force auto_upgrade OFF regardless of slot_data.
-// Purpose = isolate the Load-Game crash. With auto_upgrade off, Ready() short-circuits so the
-// detour is fully transparent (its pre-auto_upgrade behavior: no calibration, no inventory walk,
-// no id rewrite -- it just forwards to the game's AddItemFunc). If the game STILL crashes on Load
-// Game with this on, the crash is NOT in auto_upgrade and we look at the detour/game-load path.
-// Flip back to 0 to restore slot_data-driven auto_upgrade once the crash is pinned.
-static constexpr int kForceAutoUpgradeOff = 0;
-
-void SetAutoUpgrade(int on) {
-    if (kForceAutoUpgradeOff) on = 0;
-    g_autoUpgrade = on ? 1 : 0;
-    if (!g_autoUpgrade) { g_eqwBlob = g_rpwBlob = nullptr; g_rtOffset = -1; g_calibFailed = false;
-                          g_normalTarget = g_somberTarget = 0; }
-    spdlog::info("auto_upgrade: {}{}", g_autoUpgrade ? "ENABLED" : "off",
-                 kForceAutoUpgradeOff ? "  (FORCED OFF - diagnostic kill switch)" : "");
-}
-
-// Recompute the two track targets from live inventory (reuses the RemoveInventoryItem shape walk).
-// Cheap integer test: could this id be an acquirable, upgradeable weapon? Avoids the linear
-// EquipParamWeapon lookup for the ~all non-weapon inventory entries (goods/armor/garbage).
-static inline bool LooksLikeWeaponId(int32_t id) {
-    if ((static_cast<uint32_t>(id) & er_ap::CATEGORY_MASK) != er_ap::CATEGORY_WEAPON) return false;
-    if (id < 1000000 || id >= 90000000) return false;
-    return (id % 100) <= 25;
-}
-
-// One-shot region validation: VirtualQuery the array ONCE and return how many committed+readable
-// bytes are available from addr (capped to want), so the walk can read entries with raw memcpy
-// instead of a VirtualQuery per field (that path was thousands of syscalls per walk = slow).
-static inline size_t SafeRegionLen(uintptr_t addr, size_t want) {
-    if (addr < 0x10000) return 0;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof mbi) != sizeof mbi) return 0;
-    if (mbi.State != MEM_COMMIT) return 0;
-    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!(mbi.Protect & readable) || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return 0;
-    uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    size_t avail = regionEnd - addr;
-    return avail < want ? avail : want;
-}
-
-// SEH-guarded raw read for the inventory walk. SafeRegionLen validates the array with a single
-// VirtualQuery, but on reconnect the game thread bulk-grants items concurrently and can realloc/
-// free that array between the check and this read (TOCTOU). A raw memcpy would then fault and take
-// the process down; catching the access violation here turns the race into a clean bail. POD-only
-// helper on purpose: keeps __try out of RefreshAutoUpgradeTargets and avoids C2712 unwinding.
-static inline bool SehReadI32(const void* p, int32_t& out) {
-    __try { std::memcpy(&out, p, sizeof out); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
-void RefreshAutoUpgradeTargets() {
-    using namespace hooks;
-    if (!Ready() || !g_gameDataManPtrLoc) return;
-    // Throttle: a reconnect re-grants dozens of items back-to-back; a full walk per weapon stalled
-    // long enough to drop the AP socket. Between walks we reuse the cached targets (a manual
-    // smithing-table upgrade is still reflected within the throttle window).
-    uint64_t now = GetTickCount64();
-    if (g_lastRefreshTick != 0 && now - g_lastRefreshTick < kRefreshThrottleMs) return;
-    uintptr_t gdm = 0, pgd = 0;
-    if (!SafeRead(g_gameDataManPtrLoc, gdm) || gdm < 0x10000) return;
-    if (!SafeRead(gdm + GAMEDATAMAN_PGD_OFF, pgd) || pgd < 0x10000) return;
-
-    // Walk ONE container. If we already know which PlayerGameData offset is the bag, go straight
-    // there; otherwise discover it (first container that actually holds a weapon) and cache it.
-    int lo = (g_invContainerOff >= 0) ? g_invContainerOff : INV_SCAN_OFF_LO;
-    int hi = (g_invContainerOff >= 0) ? g_invContainerOff : (INV_SCAN_OFF_HI - 0x60);
-    int normal = 0, somber = 0; bool found = false;
-    for (int off = lo; off <= hi && !found; off += 8) {
-        uintptr_t cont = pgd + off; int32_t slotCount = 0;
-        if (!SafeRead(cont + INV_SLOTCOUNT_OFF, slotCount)) continue;
-        if (slotCount <= 0 || slotCount > INV_MAX_SLOTS) continue;
-        uintptr_t primary = 0, overflow = 0;
-        if (!SafeRead(cont + INV_PRIMARY_PTR_OFF, primary) || primary < 0x10000) continue;
-        if ((primary & 0x3) != 0) continue;
-        int32_t id0 = 0, qty0 = 0;
-        if (!SafeRead(primary + INV_ENTRY_ID_OFF, id0))  continue;
-        if (!SafeRead(primary + INV_ENTRY_QTY_OFF, qty0)) continue;
-        if (qty0 < 0 || qty0 > 0x270F) continue;
-        SafeRead(cont + INV_OVERFLOW_PTR_OFF, overflow);
-        const uintptr_t arrays[2] = { primary, overflow };
-        const int       counts[2] = { slotCount, INV_MAX_SLOTS };
-        int wn = 0, ws = 0, weapons = 0;
-        for (int a = 0; a < 2; ++a) {
-            uintptr_t arr = arrays[a]; if (arr < 0x10000) continue;
-            size_t okEntries = SafeRegionLen(arr, (size_t)counts[a] * INV_ENTRY_STRIDE) / INV_ENTRY_STRIDE;
-            for (size_t i = 0; i < okEntries; ++i) {
-                const uint8_t* e = reinterpret_cast<const uint8_t*>(arr + i * INV_ENTRY_STRIDE);
-                int32_t itemId;                                                  // +0x04 = resolved item id (base+level)
-                if (!SehReadI32(e + 0x04, itemId)) break;   // array freed under us mid-walk (reconnect bulk-grant race) -> bail
-                if (!LooksLikeWeaponId(itemId)) continue;
-                WInfo wi;
-                if (!WeaponInfo(itemId, wi)) continue;
-                ++weapons;
-                if (wi.somber) { if (wi.level > ws) ws = wi.level; }
-                else           { if (wi.level > wn) wn = wi.level; }
-            }
-        }
-        // Accept this container iff it holds a weapon (disambiguates the bag from look-alike
-        // memory regions, the way RemoveInventoryItem uses a target-id match). Cache its offset.
-        if (weapons > 0 || g_invContainerOff == off) {
-            normal = wn; somber = ws; g_invContainerOff = off; found = true;
-        }
-    }
-    if (found) { g_normalTarget = normal; g_somberTarget = somber; g_lastRefreshTick = now; }
-    else if (g_invContainerOff >= 0) { g_invContainerOff = -1; }   // cached offset went stale; rediscover next time
-}
-
-static bool AutoUpgradeWeaponIdImpl(int32_t inItemId, int32_t* outItemId) {
-    if (!outItemId || !Ready()) return false;
-    WInfo wi;
-    if (!WeaponInfo(inItemId, wi)) return false;            // not an upgradeable weapon
-    RefreshAutoUpgradeTargets();                            // live read (captures manual upgrades)
-    int target = wi.somber ? g_somberTarget : g_normalTarget;
-    if (target > wi.cap) target = wi.cap;
-    if (target <= wi.level) return false;                   // already at/above target
-    *outItemId = wi.base + target;
-    spdlog::info("auto_upgrade: weapon {:#x} (+{}) -> +{} ({} track, cap +{})",
-                 static_cast<uint32_t>(wi.base), wi.level, target, wi.somber ? "somber" : "normal", wi.cap);
-    return true;
-}
-
-// SEH crash-guard for the whole auto_upgrade compute. The detour fires while a save is LOADING --
-// the game is (re)building the player inventory concurrently, so the array this path walks can be
-// freed/realloced under us (TOCTOU). SehReadI32 covers the per-entry reads, but a fault can also
-// land in the container probe, SafeRegionLen's check->read window, or a param-blob row read. That
-// is the observed "crash on Load Game": the log dies right after offset calibration, mid-walk,
-// with no "weapon -> +N" line, so the fault is inside this compute (WeaponInfo/RefreshTargets),
-// not the later game AddItem call. Wrap it so ANY access violation degrades to "no upgrade; add the
-// item unchanged" instead of taking the game down. POD-only wrapper (no unwinding) -> __try legal.
-bool AutoUpgradeWeaponId(int32_t inItemId, int32_t* outItemId) {
-    __try { return AutoUpgradeWeaponIdImpl(inItemId, outItemId); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-
 
 }} // namespace er_ap::game
 #endif // _WIN32

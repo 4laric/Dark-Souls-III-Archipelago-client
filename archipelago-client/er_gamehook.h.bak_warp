@@ -112,15 +112,6 @@ int32_t GetPlayRegionId();
 // (realGoodsId | CATEGORY_GOODS); gem = -1 for goods. Calls the real AddItemFunc (bypasses the detour).
 void GrantItem(int32_t idWithCategory, int32_t quantity, int32_t gem = -1);
 
-// Auto-upgrade (slot_data auto_upgrade; patch_client_autoupgrade.py). Rewrite an inbound weapon
-// id to the player's current highest reinforce level on the SAME smithing track (cap from
-// ReinforceParamWeapon: normal up to +25, somber up to +10), read live from inventory. No-op
-// unless enabled and the weapon params resolve + calibrate.
-void SetAutoUpgrade(int on);
-bool AutoUpgradeWeaponId(int32_t inItemId, int32_t* outItemId);   // true => *outItemId rewritten
-void RefreshAutoUpgradeTargets();                                  // recompute targets from live inventory
-
-
 // Convenience for the goods-only path.
 inline void GrantGoods(int32_t realGoodsId, int32_t quantity) {
     GrantItem(static_cast<int32_t>(static_cast<uint32_t>(realGoodsId) | CATEGORY_GOODS), quantity, -1);
@@ -138,9 +129,6 @@ inline void GrantFullID(int32_t fullId, int32_t quantity) {
 
 // Set an in-game event flag (used to mark a location collected so the game won't re-offer it).
 bool SetEventFlag(uint32_t eventFlagId, bool on);
-// Warp to a grace/warp point (Hexinton CT). warpId = CT dropdown id, e.g. 68000=Gravesite Plain,
-// 12052950=Cocoon of the Empyrean. Returns false if the warp fn/singleton AOBs were not resolved.
-bool Warp(int32_t warpId);
 
 // Remove a granted item from the player's bag (TODO #6 client half). `fullItemId` carries the
 // category nibble exactly as granted (goods placeholder = realGoodsId | CATEGORY_GOODS). Walks the

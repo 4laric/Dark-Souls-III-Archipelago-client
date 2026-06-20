@@ -418,9 +418,6 @@ VOID CCore::Run() {
 				// yet been delivered, so that a quick reconnection doesn't
 				// duplicate them.
 				ItemRandomiser->receivedItemsQueue.clear();
-				// progressiveCounter is now PERSISTED + index-deduped (Core.h progressiveHighIndex), so it
-				// is NO LONGER cleared/recomputed here -- clearing it would drop the cross-session tier, and
-				// the index dedup already stops the replay from double-counting on reconnect.
 				return;
 			}
 
@@ -442,63 +439,14 @@ VOID CCore::Run() {
 			// still advanced — with batching, a connect at the menu burned the entire
 			// starting inventory (all 19 maps) into the void in ~2 ticks. Hold the queue
 			// until grants can land; items stay pending and deliver on load-in.
-			// CRASH FIX (Load Game): grant ONLY when fully settled in-world. InventoryInstance()!=0
-			// alone goes true during load-in, BEFORE the player is placed in the world; the game's
-			// AddItem then faults -- confirmed via DIAG (the first start-item grant, Torrent goods 130,
-			// died inside AddItem with no region yet). Require FieldArea to report a real PlayRegionId
-			// (!= -1 => loading screen done, player placed) AND hold it a couple of 2s ticks, so AddItem
-			// runs only once the world is live. GetPlayRegionId() is crash-guarded (returns -1 until
-			// FieldArea resolves), so this never dereferences a half-built world.
-			static int s_inWorldStableTicks = 0;
-			if (er_ap::game::InventoryInstance() != 0 && er_ap::game::GetPlayRegionId() != -1) {
-				if (s_inWorldStableTicks < 1000000) ++s_inWorldStableTicks;
-			} else {
-				s_inWorldStableTicks = 0;
-			}
-			if (s_inWorldStableTicks >= 2) {
+			if (er_ap::game::InventoryInstance() != 0) {
 				// Region-lock unlock NOTIFICATION: a lock is invisible (sentinel 99999); on receipt we grant
 				// the region's Map fragment (or token) HERE so the native item ticker fires + names the region.
 				if (!pendingNotifyGrants.empty()) {
-					// Once-per-save: grant a region's notify item (map fragment / token) only the FIRST
-					// time it is received for this save. On reconnect the items_received replay re-queues
-					// every lock, so without this the fragment was re-added + the ticker re-fired each
-					// connect. notifyGrantedAddrs (persisted) is the dedup; the lock EFFECTS run separately
-					// via idempotent SetEventFlag.
-					int _granted = 0;
-					for (int32_t addr : pendingNotifyGrants) {
-						if (notifyGrantedAddrs.count(addr)) continue;
+					for (int32_t addr : pendingNotifyGrants)
 						er_ap::game::GrantFullID(addr, 1);
-						notifyGrantedAddrs.insert(addr);
-						++_granted;
-					}
+					spdlog::info("Region-lock: granted {} unlock-notify item(s)", pendingNotifyGrants.size());
 					pendingNotifyGrants.clear();
-					if (_granted > 0) {
-						spdlog::info("Region-lock: granted {} new unlock-notify item(s)", _granted);
-						writeSaveFileNextTick = true;
-					}
-				}
-				// Start items (Torrent + flasks): grant EXACTLY ONCE per save. These are not
-				// replayed through the last_received_index stream, so re-queuing them on every
-				// (re)connect duplicated them endlessly. Gate on the persisted startItemsGranted
-				// flag and persist it after the grant.
-				if (!pendingStartItems.empty()) {
-					if (startItemsGranted) {
-						// Already granted for THIS save. The slot-data handler fills this queue at connect
-						// time, when startItemsGranted is still the in-memory default (false); LoadSaveFile()
-						// restores the persisted flag only a few lines later in init, so every reload re-fills
-						// the queue with a stale "not granted" view. Re-check the now-loaded flag and DROP the
-						// queue instead of re-adding Torrent/flasks the save already has (that re-grant was both
-						// wrong and the AddItem that crashed on Load Game).
-						spdlog::info("Start items: already granted this save; dropping {} re-queued item(s)", pendingStartItems.size());
-						pendingStartItems.clear();
-					} else {
-						for (const auto& si : pendingStartItems)
-							er_ap::game::GrantFullID(si.first, si.second);
-						spdlog::info("Start items: granted {} once-per-save item(s)", pendingStartItems.size());
-						pendingStartItems.clear();
-						startItemsGranted = true;
-						writeSaveFileNextTick = true;
-					}
 				}
 				// Pace grants so a burst doesn't flood the native item-gain ticker all at once. The queue
 				// persists across ticks, so this only spaces delivery; it never drops items. (Boss-defer was
@@ -536,28 +484,13 @@ VOID CCore::Run() {
 			// Map reveal (beta.3): under map_option=give the apworld grants no map items; set every
 			// region's reveal flag here instead. Retried each tick until the event-flag holder is
 			// ready; one-shot per connect (the handler re-arms it on reconnect). See TODO #5.
-			// CRASH-ON-LOAD FIX: every poll below dereferences LIVE game structures (the event-flag
-			// getter / CSEventFlagMan, FieldArea, boss & goal flags). isEverythingLoaded() only checks
-			// ParamRepo, which is ALSO up at the title/main menu and DURING the menu->world load
-			// transition, when those structures are null or half-constructed. Calling the event-flag
-			// getter against a mid-init CSEventFlagMan is the longstanding "crash when loading a save".
-			// Gate the whole group on the in-world signal the grant/grace path already uses.
-			if (er_ap::game::InventoryInstance() != 0) {
 			if (revealAllMapsPending && GameHook->revealAllMaps(GameHook->dEnableDLC != FALSE)) {
 				revealAllMapsPending = false;
 			}
 
-			// Region-fusion: set any queued grace warp-unlock flags. MUST be in-world: isEverythingLoaded()
-			// only means ParamRepo is up (also true at the title/loading screen, area=-1), and event flags
-			// written before the play session loads are clobbered by new-game init -- which silently dropped
-			// the start graces, Roundtable (71190), First Step (76101) and the Level-Up enable flags
-			// (4680/951). Gate on InventoryInstance() (the in-world signal the start-item grant uses); the
-			// pending queue + graceFlagsSetThisSession retry it harmlessly until then. See SPEC-region-chain.md.
+			// Region-fusion: set any queued grace warp-unlock flags (drained here, on a loaded
+			// tick, because the event-flag setter is only valid in-world). See SPEC-region-chain.md.
 			FlushPendingGraceFlags();
-
-			// Natural-key triggers: bloom regions whose vanilla trigger disjunction is now satisfied.
-			// MUST be inside this settled (InventoryInstance()!=0) block -- it reads event flags.
-			EvaluateNaturalKeyTriggers();
 
 			PollLocationFlags();
 
@@ -589,40 +522,7 @@ VOID CCore::Run() {
 				// Set KICK_FLAG (76970) ONCE per entry (latch); re-arm on leaving. Avoids a death loop when
 				// respawn lands inside a locked region. Baked common.emevd reactor warps the player out.
 				if (!locked) kickLatched = false;
-				// Start-window guard (Alaric 2026-06-20): on a random-start seed the player transiently
-				// spawns in (locked) Limgrave before the baked warp pulls them to the rolled hub; the
-				// kill-keep-runes enforcement would kill them on that spawn. Don't arm the KICK until the
-				// random-start warp has fired (randomStartDoneFlag set). Non-random seeds: done flag 0 =>
-				// guard always true => behaviour unchanged.
-				else if (!kickLatched
-					&& (randomStartDoneFlag == 0
-						|| er_ap::game::GetEventFlagState((uint32_t)randomStartDoneFlag))) {
-					kickLatched = true; er_ap::game::SetEventFlag(76970, true);
-				}
-
-				// DLC-only auto-entry (Alaric 2026-06-16): on the intro Chapel of Anticipation, set the baked
-				// entry flag ONCE -> common.emevd WarpPlayer streams the player into Gravesite Plain (m61).
-				// Data-driven (dlcEntryWarpFlag=76999, dlcStartAreaId=Chapel area id); absent => no-op. Gated
-				// on 62002 ("DLC entered") so it fires once, not on the optional late-game Chapel revisit.
-				static bool dlcEntryLatched = false;
-				if (dlcEntryWarpFlag && dlcStartAreaId && pr == dlcStartAreaId
-					&& !er_ap::game::GetEventFlagState(62002) && !dlcEntryLatched) {
-					dlcEntryLatched = true;
-					er_ap::game::SetEventFlag((uint32_t)dlcEntryWarpFlag, true);
-					spdlog::info("DLC auto-entry: in start area {} -> set flag {} -> warp to Gravesite Plain", pr, dlcEntryWarpFlag);
-				}
-
-				// Random starting region (mirrors DLC auto-entry): on the intro Chapel, set the baked warp
-				// flag ONCE -> common.emevd WarpPlayer -> the rolled start region. Persistent randomStartDoneFlag
-				// guards the optional late Chapel revisit / reconnect.
-				static bool randomStartLatched = false;
-				if (randomStartWarpFlag && randomStartAreaId && randomStartDoneFlag && pr == randomStartAreaId
-					&& !er_ap::game::GetEventFlagState((uint32_t)randomStartDoneFlag) && !randomStartLatched) {
-					randomStartLatched = true;
-					er_ap::game::SetEventFlag((uint32_t)randomStartDoneFlag, true);
-					er_ap::game::SetEventFlag((uint32_t)randomStartWarpFlag, true);
-					spdlog::info("Random start: in area {} -> set flag {} -> warp to start region", pr, randomStartWarpFlag);
-				}
+				else if (!kickLatched) { kickLatched = true; er_ap::game::SetEventFlag(76970, true); }
 			}
 
 			// Goal: ec 0/1 detect via boss defeat flag; ec 2/3 via all goal locations
@@ -632,7 +532,6 @@ VOID CCore::Run() {
 				sendGoalStatus = false;
 				ArchipelagoInterface->gameFinished();
 			}
-			}  // end in-world poll gate (InventoryInstance() != 0)
 		} else if (initProtectionDelay > 0) {
 			int secondsRemaining = (RUN_SLEEP / 1000) * initProtectionDelay;
 			spdlog::debug("The mod will be initialized in {} seconds", secondsRemaining);
@@ -716,10 +615,6 @@ VOID CCore::InputCommand() {
 				"List of available commands : \n"
 				"/help : Prints this help message.\n"
 				"!help : Prints the help message related to Archipelago.\n"
-				"/warp <id> : Warp to a grace/warp point (e.g. /warp 68000 = Gravesite Plain).\n"
-				"/setflag <id> <0|1> : Set an event flag (e.g. /setflag 12050800 1 = Mohg defeated).\n"
-				"/getflag <id> : Read an event flag.\n"
-				"/dumpflags <lo> <hi> [label] : Dump every SET flag in a range to flagdump_<label>.txt.\n"
 				"/debug on|off : Prints additional debug info");
 		}
 
@@ -751,57 +646,6 @@ VOID CCore::InputCommand() {
 			
 #endif
 
-		if (line.find("/warp ") == 0) {
-			int _wid = 0;
-			try { _wid = std::stoi(line.substr(6)); } catch (...) { spdlog::warn("/warp: invalid id"); }
-			if (_wid) {
-				bool _ok = er_ap::game::Warp(_wid);
-				spdlog::info("/warp {} -> {}", _wid, _ok ? "sent (be loaded into the world)" : "FAILED (warp fn unresolved)");
-			}
-		}
-		
-		if (line.find("/setflag ") == 0) {
-			std::string _a = line.substr(9);
-			size_t _sp = _a.find(' ');
-			long _fid = 0; int _on = 1;
-			try { _fid = std::stol(_a.substr(0, _sp)); if (_sp != std::string::npos) _on = std::stoi(_a.substr(_sp + 1)); } catch (...) { _fid = 0; }
-			if (_fid > 0) {
-				bool _ok = er_ap::game::SetEventFlag(static_cast<uint32_t>(_fid), _on != 0);
-				spdlog::info("/setflag {} = {} -> {}", _fid, _on, _ok ? "ok" : "FAILED (be loaded in-world)");
-			} else spdlog::warn("/setflag <id> <0|1>");
-		}
-		if (line.find("/getflag ") == 0) {
-			long _fid = 0;
-			try { _fid = std::stol(line.substr(9)); } catch (...) { _fid = 0; }
-			if (_fid > 0) {
-				bool _v = er_ap::game::GetEventFlagState(static_cast<uint32_t>(_fid));
-				spdlog::info("/getflag {} = {}", _fid, _v ? 1 : 0);
-			} else spdlog::warn("/getflag <id>");
-		}
-		
-		if (line.find("/dumpflags ") == 0) {
-			std::string _a = line.substr(11);
-			size_t _s1 = _a.find(' ');
-			long _lo = 0, _hi = 0; std::string _lbl = "dump";
-			try {
-				_lo = std::stol(_a.substr(0, _s1));
-				std::string _rest = (_s1 == std::string::npos) ? std::string() : _a.substr(_s1 + 1);
-				size_t _s2 = _rest.find(' ');
-				_hi = std::stol(_rest.substr(0, _s2));
-				if (_s2 != std::string::npos) _lbl = _rest.substr(_s2 + 1);
-			} catch (...) { _lo = 0; _hi = 0; }
-			if (_hi > _lo) {
-				std::string _fn = "flagdump_" + _lbl + ".txt";
-				std::ofstream _fd{ _fn };
-				long _cnt = 0;
-				for (long _f = _lo; _f <= _hi; ++_f) {
-					if (er_ap::game::GetEventFlagState(static_cast<uint32_t>(_f))) { _fd << _f << "\n"; ++_cnt; }
-				}
-				_fd.close();
-				spdlog::info("/dumpflags {}..{} '{}' -> {} set, wrote {}", _lo, _hi, _lbl, _cnt, _fn);
-			} else spdlog::warn("/dumpflags <lo> <hi> [label]");
-		}
-		
 		if (line.find("/debug ") == 0) {
 			std::string param = line.substr(7);
 			BOOL res = (param.find("on") == 0);
@@ -898,10 +742,6 @@ void CCore::LoadSaveFile() {
 	try {
 		gameFile >> k;
 		k.at("last_received_index").get_to(pLastReceivedIndex);
-		if (k.contains("start_items_granted")) k.at("start_items_granted").get_to(startItemsGranted);
-		if (k.contains("notify_granted")) for (const auto& a : k.at("notify_granted")) notifyGrantedAddrs.insert(a.get<int32_t>());
-		if (k.contains("progressive_counter")) k.at("progressive_counter").get_to(progressiveCounter);
-		if (k.contains("progressive_high_index")) k.at("progressive_high_index").get_to(progressiveHighIndex);
 	}
 	catch (const std::exception& error) {
 		RemoveOldSaveFile();
@@ -913,11 +753,18 @@ void CCore::LoadSaveFile() {
 		);
 	}
 
-	// Keep the save on load -- WriteSaveFile() overwrites it after each grant, and NOT deleting it
-	// means a crash/quit before the next write can't orphan the index. (Deleting here used to leave
-	// 'No save file found' on the next reconnect -> last_received_index reset to 0 -> EVERY received
-	// item re-granted, which both duplicates inventory and was crashing reconnects in a loop.)
+	// Close the read handle before deleting — DeleteFileW fails with a sharing violation while
+	// the ifstream is still open (seen live: "being used by another process").
 	gameFile.close();
+	spdlog::debug("Deleting {}", savePath.string());
+	if (!DeleteFileW(WindowsLongPath(savePath).c_str())) {
+		auto text = GetLastWin32ErrorText();
+		spdlog::warn(
+			text.has_value()
+			? "Could not delete " + savePath.string() + ": " + text.value()
+			: "Could not delete " + savePath.string() + "."
+		);
+	}
 };
 
 // ER port: poll the event flag guarding each AP location and send checks for newly set flags.
@@ -962,11 +809,6 @@ VOID CCore::PollLocationFlags() {
 	// no locationFlags indirection. A location can appear under several flags; flagSentLocations
 	// dedupes, so it sends on whichever fires first (boss killed OR grace lit).
 	for (const auto& sweep : sweepFlags) {
-		// Skip graces the CLIENT force-lit (start graces, on-receipt region bundles, region-open --
-		// all funneled through FlushPendingGraceFlags -> graceFlagsSetThisSession). Those aren't
-		// graces the player rested at, so sweeping their checks would dump them at spawn / on lock
-		// receipt. Boss DefeatFlags are never client-set, so the boss sweep is unaffected.
-		if (graceFlagsSetThisSession.count(sweep.first)) continue;
 		if (!er_ap::game::GetEventFlagState(sweep.first)) continue;
 		int swept = 0;
 		for (int64_t member : sweep.second) {
@@ -1009,55 +851,6 @@ VOID CCore::FlushPendingGraceFlags() {
 	}
 }
 
-// Natural-key triggers (SPEC-natural-locks.md): a region blooms when a DISJUNCTION of vanilla
-// triggers is satisfied, instead of when a synthetic lock item arrives. For each lock, a clause
-// is satisfied when ALL its items were received (by NAME) AND ALL its flags are set; ANY clause
-// fires the bloom. The region open flag (save-persisted via SetEventFlag in FlushPendingGraceFlags)
-// doubles as the once-latch -- once set, the guard below skips the lock forever, so re-blooming on
-// reconnect/replay is a no-op. Called ONLY from the settled InventoryInstance()!=0 poll block, so
-// GetEventFlagState is always valid (never mid-init). The bloom pushes flags onto pendingGraceFlags
-// (flushed next tick) + lockNotifyItems onto pendingNotifyGrants, exactly like the lock-item path.
-VOID CCore::EvaluateNaturalKeyTriggers() {
-	if (naturalKeyTriggers.empty()) return;
-	for (const auto& nk : naturalKeyTriggers) {
-		const std::string& name = nk.first;
-		const std::vector<NKClause>& clauses = nk.second;
-		// Guard: skip if this region has no open flag, or its open flag is already set (latch).
-		auto openIt = regionOpenFlags.find(name);
-		if (openIt == regionOpenFlags.end()) continue;
-		if (er_ap::game::GetEventFlagState(openIt->second)) continue;  // already bloomed (latch)
-		// Any clause satisfied? (all items received AND all flags set)
-		bool fired = false;
-		for (const auto& cl : clauses) {
-			bool ok = true;
-			for (const std::string& nm : cl.items) {
-				if (!receivedItemNames.count(nm)) { ok = false; break; }
-			}
-			if (ok) {
-				for (uint32_t fl : cl.flags) {
-					if (!er_ap::game::GetEventFlagState(fl)) { ok = false; break; }
-				}
-			}
-			if (ok) { fired = true; break; }
-		}
-		if (!fired) continue;
-		// BLOOM: queue this region's grace + open + reveal flags onto pendingGraceFlags (flushed
-		// next tick by FlushPendingGraceFlags -> SetEventFlag), and its notify item if present.
-		int queued = 0;
-		auto graceIt = regionGraces.find(name);
-		if (graceIt != regionGraces.end())
-			for (uint32_t fl : graceIt->second) { pendingGraceFlags.push_back(fl); ++queued; }
-		pendingGraceFlags.push_back(openIt->second); ++queued;  // open flag = latch + fog gate cond
-		auto revealIt = lockRevealFlags.find(name);
-		if (revealIt != lockRevealFlags.end())
-			for (int32_t fl : revealIt->second) { pendingGraceFlags.push_back((uint32_t)fl); ++queued; }
-		auto notifyIt = lockNotifyItems.find(name);
-		if (notifyIt != lockNotifyItems.end())
-			pendingNotifyGrants.push_back(notifyIt->second);
-		spdlog::info("Natural-key '{}' satisfied: bloomed region ({} flag(s) queued)", name, queued);
-	}
-}
-
 // ER port: persist last_received_index to the JSON save file after each grant (see the
 // writeSaveFileNextTick consumer in Run). LoadSaveFile() reads and deletes this at startup.
 void CCore::WriteSaveFile() {
@@ -1068,10 +861,6 @@ void CCore::WriteSaveFile() {
 	try {
 		json k;
 		k["last_received_index"] = pLastReceivedIndex;
-		k["start_items_granted"] = startItemsGranted;
-		k["notify_granted"] = std::vector<int32_t>(notifyGrantedAddrs.begin(), notifyGrantedAddrs.end());
-		k["progressive_counter"] = progressiveCounter;
-		k["progressive_high_index"] = progressiveHighIndex;
 		std::ofstream gameFile{ WindowsLongPath(savePath) };
 		gameFile << k;
 		gameFile.close();

@@ -32,12 +32,19 @@ static const std::unordered_map<int32_t, uint32_t> kMapUnlockFlags = {
 	{8611, 62050}, {8612, 62051}, {8618, 62052},   // Mountaintops W/E, Snowfield
 	{8613, 62060}, {8614, 62061}, {8616, 62062},   // Ainsel, Lake of Rot, Mohgwyn
 	{8615, 62063}, {8617, 62064},                  // Siofra, Deeproot
-	// DLC (UNVERIFIED -- check against the Hexinton CT):
-	{2008600, 62080},  // Gravesite Plain
-	{2008601, 62081},  // Scadu Altus
-	{2008602, 62082},  // Southern Shore
-	{2008603, 62083},  // Rauh Ruins
-	{2008604, 62084},  // Abyss
+	// DLC (Land of Shadow): per-piece reveal flags 62080-62084 are REAL -- they are the
+	// openEventFlagIds of WorldMapPieceParam rows 1000-1004 (verified against the Smithbox
+	// param dump), sitting right after the base pieces. The earlier "62080-84 are invented,
+	// collapse to 82001" change was a regression: 82001 at most unlocks the DLC map PAGE and
+	// leaves every piece fogged (Gravesite map missing). Set each piece flag like the base
+	// game does (base pieces work with their open flag alone, no page flag), plus 82001 once
+	// as page-unlock insurance (synthetic key 2008605; >=2000000 so it stays DLC-gated).
+	{2008600, 62080},  // Gravesite Plain  (WorldMapPieceParam 1000)
+	{2008601, 62081},  // Scadu Altus      (1001)
+	{2008602, 62082},  // Southern Shore   (1002)
+	{2008603, 62083},  // Rauh Ruins       (1003)
+	{2008604, 62084},  // Abyss            (1004)
+	{2008605, 82001},  // + DLC map page-unlock (synthetic key, carries 82001)
 };
 
 // Grant one queued received item (item.address = randomizer FullID; category-aware grant —
@@ -49,8 +56,8 @@ VOID CGameHook::GiveNextItem() {
 	// The apworld's region-lock keys are logic-only: sentinel er_code 99999, no real param
 	// row. Granting that id would hand the game a nonexistent goods row; skip the grant
 	// (the received index still advances, so it won't replay on reconnect).
-	if ((item.address & 0x0FFFFFFF) == 99999) {
-		spdlog::info("Received logic-only lock item (sentinel 99999); no in-game grant");
+	if ((item.address & 0x0FFFFFFF) == 99999 || (item.address & 0x0FFFFFFF) == 99998) {
+		spdlog::info("Received sentinel item (no real param row); no in-game grant");
 	} else {
 		er_ap::game::GrantFullID(static_cast<int32_t>(item.address), static_cast<int32_t>(item.count));
 		// Map fragments: also set the map-reveal event flag (see kMapUnlockFlags).
