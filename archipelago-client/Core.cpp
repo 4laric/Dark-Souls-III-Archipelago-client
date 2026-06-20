@@ -561,6 +561,12 @@ VOID CCore::Run() {
 
 			PollLocationFlags();
 
+			// Global Scadutree Blessing (SPEC-global-scadutree-blessing.md): raise the stored
+			// blessing level from held Scadutree Fragments so the buff applies in the base game.
+			// No-op unless slot_data global_scadutree_blessing != off. MUST be in this settled
+			// (InventoryInstance()!=0) block -- it reads/writes live PlayerGameData.
+			er_ap::game::TickGlobalScaduBlessing();
+
 			// Region-lock enforcement poll (play-region/fog-gate pivot). The open world doesn't fire
 			// IF-In-Area on dynamically-added MSB regions, so detection lives here -- the player's area
 			// id (the FieldArea mapNameId, same signal that draws the area-name banner). Generalized via

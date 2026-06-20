@@ -691,5 +691,93 @@ bool AutoUpgradeWeaponId(int32_t inItemId, int32_t* outItemId) {
 }
 
 
+
+// ===== global Scadutree Blessing (slot_data global_scadutree_blessing) ======================
+// SPEC-global-scadutree-blessing.md (P1). Count held Scadutree Fragments -> blessing level via
+// the vanilla cost curve -> write the stored combat blessing byte at PlayerGameData + 0xFC so the
+// 20000100+N buff applies in the base game (the engine recomputes the speffect from this byte on
+// the next map load / grace rest). Offset from the Hexinton/TGA CE table: GameDataMan -> +0x08 ->
+// +0xFC (signed byte). NOTE: 0xFC is relative to the client's resolved `pgd`; this assumes the
+// client's pgd == the table's [GameDataMan+0x08]. If the buff never applies, verify that first.
+namespace {
+    int g_globalScaduBlessing = 0;   // 0=off, 1=player_only, 2=scaled
+    const uintptr_t kScaduCombatLevelOff = 0xFC;   // PlayerGameData + 0xFC (combat blessing, byte)
+    // cumulative Scadutree Fragments required to REACH each combat level (0..20):
+    const int kScaduCum[21] = {0,1,3,5,7,9,11,13,15,17,20,23,26,29,32,35,38,41,44,47,50};
+}
+
+// POD-only SEH write helper (keeps __try out of the spdlog-using tick fn; see SehReadI32).
+static inline bool SehWriteU8(void* p, uint8_t v) {
+    __try { *reinterpret_cast<volatile uint8_t*>(p) = v; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void SetGlobalScaduBlessing(int mode) {
+    g_globalScaduBlessing = (mode == 1 || mode == 2) ? mode : 0;
+    spdlog::info("global_scadu_blessing: {}", g_globalScaduBlessing ? "ENABLED" : "off");
+}
+
+void TickGlobalScaduBlessing() {
+    using namespace hooks;
+    if (!g_globalScaduBlessing) return;
+    if (!Ready() || !g_gameDataManPtrLoc) return;
+    // Throttle: this walks the bag; once a second is plenty for a stored-byte watchdog.
+    static uint64_t s_lastTick = 0;
+    uint64_t now = GetTickCount64();
+    if (s_lastTick != 0 && now - s_lastTick < 1000) return;
+    s_lastTick = now;
+
+    uintptr_t gdm = 0, pgd = 0;
+    if (!SafeRead(g_gameDataManPtrLoc, gdm) || gdm < 0x10000) return;
+    if (!SafeRead(gdm + GAMEDATAMAN_PGD_OFF, pgd) || pgd < 0x10000) return;
+
+    // Both AP fragment items ('Scadutree Fragment' / '... x2') share goods id 2010000, so the bag
+    // holds ONE stack whose quantity = total fragments. In the bag, goods carry the category nibble.
+    const uint32_t kFragFull = 2010000u | CATEGORY_GOODS;
+    int fragQty = 0; bool found = false;
+    int lo = (g_invContainerOff >= 0) ? g_invContainerOff : INV_SCAN_OFF_LO;
+    int hi = (g_invContainerOff >= 0) ? g_invContainerOff : (INV_SCAN_OFF_HI - 0x60);
+    for (int off = lo; off <= hi && !found; off += 8) {
+        uintptr_t cont = pgd + off; int32_t slotCount = 0;
+        if (!SafeRead(cont + INV_SLOTCOUNT_OFF, slotCount)) continue;
+        if (slotCount <= 0 || slotCount > INV_MAX_SLOTS) continue;
+        uintptr_t primary = 0, overflow = 0;
+        if (!SafeRead(cont + INV_PRIMARY_PTR_OFF, primary) || primary < 0x10000) continue;
+        if ((primary & 0x3) != 0) continue;
+        SafeRead(cont + INV_OVERFLOW_PTR_OFF, overflow);
+        const uintptr_t arrays[2] = { primary, overflow };
+        const int       counts[2] = { slotCount, INV_MAX_SLOTS };
+        for (int a = 0; a < 2 && !found; ++a) {
+            uintptr_t arr = arrays[a]; if (arr < 0x10000) continue;
+            size_t okEntries = SafeRegionLen(arr, (size_t)counts[a] * INV_ENTRY_STRIDE) / INV_ENTRY_STRIDE;
+            for (size_t i = 0; i < okEntries; ++i) {
+                const uint8_t* e = reinterpret_cast<const uint8_t*>(arr + i * INV_ENTRY_STRIDE);
+                int32_t itemId = 0, qty = 0;
+                if (!SehReadI32(e + INV_ENTRY_ID_OFF, itemId)) break;   // array freed mid-walk -> bail
+                if (static_cast<uint32_t>(itemId) != kFragFull) continue;
+                if (!SehReadI32(e + INV_ENTRY_QTY_OFF, qty)) break;
+                if (qty < 0) qty = 0; if (qty > 0x270F) qty = 0x270F;
+                fragQty = qty; found = true;
+                if (g_invContainerOff < 0) g_invContainerOff = off;   // cache the bag
+                break;
+            }
+        }
+    }
+    // No fragment stack found this tick -> hold 0; never write a transient 0 (avoids flicker if the
+    // walk raced a realloc). Once you hold >=1 fragment, found==true and we set the level.
+    if (!found) return;
+
+    int level = 0;
+    for (int L = 20; L >= 0; --L) { if (fragQty >= kScaduCum[L]) { level = L; break; } }
+
+    uint8_t cur = 0;
+    if (!SafeRead(pgd + kScaduCombatLevelOff, cur)) return;
+    // Only ever RAISE the stored level: never stomp a real DLC revere, never down-flicker.
+    if (static_cast<int>(cur) >= level) return;
+    if (SehWriteU8(reinterpret_cast<void*>(pgd + kScaduCombatLevelOff), static_cast<uint8_t>(level)))
+        spdlog::info("global_scadu_blessing: frags={} -> blessing level {} (PGD+0xFC, was {})",
+                     fragQty, level, static_cast<int>(cur));
+}
+
 }} // namespace er_ap::game
 #endif // _WIN32

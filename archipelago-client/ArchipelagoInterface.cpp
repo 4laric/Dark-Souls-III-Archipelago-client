@@ -93,6 +93,11 @@ BOOL CArchipelago::Initialise(std::string URI) {
 				er_ap::game::SetAutoUpgrade(data.at("options").at("auto_upgrade").get<int>());
 			else
 				er_ap::game::SetAutoUpgrade(0);
+			// Global Scadutree Blessing (default off; patch_client_global_scadu_blessing.py).
+			if (data.at("options").contains("global_scadutree_blessing"))
+				er_ap::game::SetGlobalScaduBlessing(data.at("options").at("global_scadutree_blessing").get<int>());
+			else
+				er_ap::game::SetGlobalScaduBlessing(0);
 		}
 
 		// Goal locations (optional; nonempty for ending_condition 2/3): goal = all checked.

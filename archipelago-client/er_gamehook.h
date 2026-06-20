@@ -120,6 +120,14 @@ void SetAutoUpgrade(int on);
 bool AutoUpgradeWeaponId(int32_t inItemId, int32_t* outItemId);   // true => *outItemId rewritten
 void RefreshAutoUpgradeTargets();                                  // recompute targets from live inventory
 
+// Global Scadutree Blessing (slot_data global_scadutree_blessing; SPEC-global-scadutree-blessing.md).
+// mode: 0=off, 1=player_only, 2=scaled. When != off, TickGlobalScaduBlessing() (called each in-world
+// tick from Core) counts held Scadutree Fragments, converts to a blessing level via the vanilla cost
+// curve, and RAISES the game's stored combat blessing byte (PlayerGameData +0xFC) so the DLC blessing
+// buff applies in the base game. Never reduces the stored level. Combat track only (v1).
+void SetGlobalScaduBlessing(int mode);
+void TickGlobalScaduBlessing();
+
 
 // Convenience for the goods-only path.
 inline void GrantGoods(int32_t realGoodsId, int32_t quantity) {
