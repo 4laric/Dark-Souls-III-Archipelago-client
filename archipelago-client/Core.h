@@ -126,6 +126,11 @@ public:
 	// by the time it reaches the grant path (GameHook.cpp GiveNextItem) — identity only exists
 	// in the received-items handler. Populated by ArchipelagoInterface at connect.
 	std::unordered_map<std::string, std::vector<uint32_t>> regionGraces;
+	// Grace rando (slot_data "graceItems"; SPEC-grace-rando.md): AP item NAME ->
+	// ONE warp-unlock event flag set when that grace item is received. Reuses the
+	// regionGraces pattern (keyed by NAME, drained via pendingGraceFlags +
+	// FlushPendingGraceFlags). Present only when grace rando is active; empty otherwise.
+	std::unordered_map<std::string, uint32_t> graceItems;
 
 	// Grace warp flags queued by the received-items handler (the only place a lock item's
 	// identity is known) and drained on an in-game tick by FlushPendingGraceFlags (the only

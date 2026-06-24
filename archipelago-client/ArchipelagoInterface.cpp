@@ -138,6 +138,17 @@ BOOL CArchipelago::Initialise(std::string URI) {
 			}
 		}
 
+		// Grace rando (SPEC-grace-rando.md): AP item name -> one warp-unlock flag.
+		// Parsed alongside regionGraces; queued on receipt and set through the same
+		// pendingGraceFlags drain (CCore::FlushPendingGraceFlags).
+		Core->graceItems.clear();
+		if (data.contains("graceItems")) {
+			data.at("graceItems").get_to(Core->graceItems);
+			if (!Core->graceItems.empty())
+				spdlog::info("Grace rando: {} grace item(s) will set a warp flag on receipt",
+					Core->graceItems.size());
+		}
+
 		// Region-open flags (physical enforcement; SPEC-region-fog-gates.md): lock-item name -> one
 		// flag set on receipt, gated on by baked border fog gates. Parsed alongside regionGraces;
 		// set through the same pendingGraceFlags drain.
@@ -330,6 +341,16 @@ BOOL CArchipelago::Initialise(std::string URI) {
 				}
 				spdlog::info("Region lock '{}' received: queued {} grace flag(s)",
 					itemname, graceIt->second.size());
+			}
+
+			// Grace rando: if this item is a grace item, queue its single warp-unlock
+			// flag for FlushPendingGraceFlags. Same queue/drain as the region-lock graces;
+			// SetEventFlag is idempotent + save-persisted, so re-queue on reconnect is safe.
+			auto graceItemIt = Core->graceItems.find(itemname);
+			if (graceItemIt != Core->graceItems.end()) {
+				Core->pendingGraceFlags.push_back(graceItemIt->second);
+				spdlog::info("Grace item '{}' received: queued warp flag {}",
+					itemname, graceItemIt->second);
 			}
 
 			// Region-fusion (physical): also queue the region-open flag so baked border fog gates
